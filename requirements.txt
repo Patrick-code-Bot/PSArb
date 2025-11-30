@@ -1,0 +1,5 @@
+# NautilusTrader - Algorithmic Trading Platform
+nautilus_trader>=1.200.0
+
+# Additional dependencies
+python-dotenv>=1.0.0
