@@ -1,0 +1,103 @@
+# ============================================================================
+# Docker ignore file for GoldArb
+# ============================================================================
+# Files and directories that should NOT be copied into the Docker image
+# ============================================================================
+
+# Environment files (security - use docker-compose env instead)
+.env
+.env.local
+*.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+goldarb_venv/
+nautilus_venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+*.log
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation (not needed in production container)
+*.md
+docs/
+IMPLEMENTATION_SUMMARY.md
+README.md
+RELEASE_NOTES_GITHUB.md
+RELEASE_NOTES_v1.0.0.md
+STRATEGY_EXPLANATION.md
+
+# Scripts (not needed in container)
+*.sh
+setup.sh
+
+# Systemd service files
+*.service
+
+# Logs (will be volume-mounted)
+*.log
+logs/
+trader_*.log
+
+# Data files (will be volume-mounted)
+data/
+*.db
+*.sqlite
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Docker files (no need to copy into image)
+Dockerfile
+docker-compose.yml
+.dockerignore
