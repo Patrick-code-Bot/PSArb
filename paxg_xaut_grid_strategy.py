@@ -135,12 +135,15 @@ class PaxgXautGridStrategy(Strategy):
             self.grid_state[level] = GridPositionState(level=level)
 
         if self.config.auto_subscribe:
-            self.subscribe_instrument(self.paxg_id)
-            self.subscribe_instrument(self.xaut_id)
+            # Subscribe to quote ticks for both instruments
+            self.subscribe_quote_ticks(instrument_id=self.paxg_id)
+            self.subscribe_quote_ticks(instrument_id=self.xaut_id)
+            self.log.info(
+                f"Subscribed to quote ticks: PAXG={self.paxg_id}, XAUT={self.xaut_id}"
+            )
 
         self.log.info(
-            f"Subscribed PAXG={self.paxg_id} XAUT={self.xaut_id}, "
-            f"grid_levels={self.config.grid_levels}"
+            f"Strategy initialized with grid_levels={self.config.grid_levels}"
         )
 
     def on_stop(self) -> None:
