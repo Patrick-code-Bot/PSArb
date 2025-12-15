@@ -2,7 +2,7 @@
 PAXG-XAUT Grid Spread Arbitrage Strategy (NautilusTrader, Bybit single-venue)
 
 逻辑概要：
-- 在 Bybit 上订阅 PAXG/USDT-PERP 与 XAUT/USDT-PERP 两个合约
+- 在 Bybit 上订阅 PAXG/USDT-LINEAR 与 XAUT/USDT-LINEAR 两个合约
 - 实时计算价差 spread = (PAXG - XAUT) / XAUT
 - 使用预设的网格 levels（例如 [0.001, 0.002, ...]）
 - 当 spread 超过某一档 level：高卖贵的、低买便宜的（成对开仓）
@@ -14,11 +14,11 @@ PAXG-XAUT Grid Spread Arbitrage Strategy (NautilusTrader, Bybit single-venue)
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional, List, Tuple
+from typing import Dict, Optional, List, Tuple, Any
 
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.config import StrategyConfig
-from nautilus_trader.model.identifiers import InstrumentId, OrderId, PositionId
+from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.orders import LimitOrder
@@ -28,12 +28,11 @@ from nautilus_trader.model.orders import LimitOrder
 # 配置 Config
 # ==========================
 
-@dataclass
-class PaxgXautGridConfig(StrategyConfig):
+class PaxgXautGridConfig(StrategyConfig, frozen=True):
     # 交易标的（请用你实际环境里的 InstrumentId 字符串）
-    # 例如："PAXGUSDT-PERP.BYBIT" 和 "XAUTUSDT-PERP.BYBIT"
-    paxg_instrument_id: str = "PAXGUSDT-PERP.BYBIT"
-    xaut_instrument_id: str = "XAUTUSDT-PERP.BYBIT"
+    # 例如："PAXGUSDT-LINEAR.BYBIT" 和 "XAUTUSDT-LINEAR.BYBIT"
+    paxg_instrument_id: str = "PAXGUSDT-LINEAR.BYBIT"
+    xaut_instrument_id: str = "XAUTUSDT-LINEAR.BYBIT"
 
     # 网格档位（价差：相对 XAUT 的百分比）
     # 例如 0.001 = 0.10%，0.01 = 1%
@@ -43,11 +42,11 @@ class PaxgXautGridConfig(StrategyConfig):
     )
 
     # 每档网格对应的名义价值（USDT），真实下单数量 = notional / price
-    base_notional_per_level: float = 2_000.0
+    base_notional_per_level: float = 100.0
 
     # 最大总名义风险（两条腿合计）
     # 如果你打算 10x 杠杆，可以设置为：账户权益的 5~8 倍（视风险偏好）
-    max_total_notional: float = 40_000.0
+    max_total_notional: float = 1000.0
 
     # 目标杠杆（仅用于日志与风险思路说明；实际杠杆通过 Bybit 账户/仓位配置控制）
     target_leverage: float = 10.0
@@ -78,8 +77,8 @@ class PaxgXautGridConfig(StrategyConfig):
 @dataclass
 class GridPositionState:
     level: float
-    paxg_pos_id: Optional[PositionId] = None
-    xaut_pos_id: Optional[PositionId] = None
+    paxg_pos_id: Optional[Any] = None  # PositionId type
+    xaut_pos_id: Optional[Any] = None  # PositionId type
     # 可以扩展记录：建仓价、建仓时间等
 
 
@@ -90,8 +89,6 @@ class GridPositionState:
 class PaxgXautGridStrategy(Strategy):
     def __init__(self, config: PaxgXautGridConfig) -> None:
         super().__init__(config)
-
-        self.config: PaxgXautGridConfig = config
 
         # Instruments
         self.paxg_id = InstrumentId.from_str(config.paxg_instrument_id)
@@ -111,7 +108,7 @@ class PaxgXautGridStrategy(Strategy):
 
         # 在途订单追踪：order_id -> (level, leg)
         # leg: "PAXG_LONG", "PAXG_SHORT", "XAUT_LONG", "XAUT_SHORT"
-        self.working_orders: Dict[OrderId, tuple[float, str]] = {}
+        self.working_orders: Dict[Any, tuple[float, str]] = {}  # OrderId type
 
         # 累计名义风险
         self.total_notional: float = 0.0
@@ -340,7 +337,7 @@ class PaxgXautGridStrategy(Strategy):
         for level, state in self.grid_state.items():
             self._close_grid(level, state)
 
-    def _close_position(self, pos_id: PositionId) -> None:
+    def _close_position(self, pos_id: Any) -> None:  # PositionId type
         pos = self.cache.position(pos_id)
         if pos is None:
             return

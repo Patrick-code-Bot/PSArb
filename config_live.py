@@ -12,9 +12,9 @@ from nautilus_trader.config import (
     LiveExecEngineConfig,
     LoggingConfig,
     TradingNodeConfig,
-    StrategyConfig,
 )
 from nautilus_trader.model.identifiers import TraderId
+from nautilus_trader.trading.config import ImportableStrategyConfig
 
 from paxg_xaut_grid_strategy import PaxgXautGridConfig
 
@@ -32,8 +32,8 @@ def create_live_config() -> TradingNodeConfig:
     # Strategy configuration
     strategy_config = PaxgXautGridConfig(
         # Instrument IDs (Bybit perpetual swaps)
-        paxg_instrument_id="PAXGUSDT-PERP.BYBIT",
-        xaut_instrument_id="XAUTUSDT-PERP.BYBIT",
+        paxg_instrument_id="PAXGUSDT-LINEAR.BYBIT",
+        xaut_instrument_id="XAUTUSDT-LINEAR.BYBIT",
 
         # Grid levels (price spread as percentage of XAUT price)
         # Example: 0.001 = 0.10%, 0.01 = 1%
@@ -49,8 +49,8 @@ def create_live_config() -> TradingNodeConfig:
         ],
 
         # Risk management
-        base_notional_per_level=2000.0,  # USDT per grid level
-        max_total_notional=40000.0,      # Maximum total exposure (USDT)
+        base_notional_per_level=100.0,  # USDT per grid level
+        max_total_notional=1000.0,      # Maximum total exposure (USDT)
         target_leverage=10.0,             # Target leverage (informational)
 
         # Trading parameters
@@ -65,6 +65,13 @@ def create_live_config() -> TradingNodeConfig:
 
         # Strategy identification (required for multiple strategy instances)
         order_id_tag="001",
+    )
+
+    # Wrap strategy config in ImportableStrategyConfig
+    importable_config = ImportableStrategyConfig(
+        strategy_path="paxg_xaut_grid_strategy:PaxgXautGridStrategy",
+        config_path="paxg_xaut_grid_strategy:PaxgXautGridConfig",
+        config=strategy_config.dict(),
     )
 
     # Bybit data client configuration
@@ -95,7 +102,7 @@ def create_live_config() -> TradingNodeConfig:
     logging_config = LoggingConfig(
         log_level="INFO",
         log_level_file="DEBUG",
-        log_directory=Path("logs"),
+        log_directory="logs",
         log_file_name="paxg_xaut_grid",
         log_file_format="json",
         log_colors=True,
@@ -128,17 +135,13 @@ def create_live_config() -> TradingNodeConfig:
         },
 
         # Strategy configurations
-        strategies=[strategy_config],
+        strategies=[importable_config],
 
         # Timeout settings
         timeout_connection=30.0,
         timeout_reconciliation=10.0,
         timeout_portfolio=10.0,
         timeout_disconnection=10.0,
-
-        # Persistence
-        cache_database=None,  # Can configure Redis or similar
-        save_strategy_state=True,
     )
 
     return config

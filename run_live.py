@@ -103,8 +103,8 @@ async def main():
         print("\nStrategy: PAXG-XAUT Grid Arbitrage")
         print(f"Venue: Bybit {'(Testnet)' if testnet else '(Live)'}")
         print("Instruments:")
-        print("  - PAXGUSDT-PERP")
-        print("  - XAUTUSDT-PERP")
+        print("  - PAXGUSDT-LINEAR")
+        print("  - XAUTUSDT-LINEAR")
         print("\nPress Ctrl+C to stop the trading node...")
         print("=" * 80 + "\n")
 

@@ -6,7 +6,7 @@
 # ============================================================================
 
 # Stage 1: Base image with Python
-FROM python:3.11-slim AS base
+FROM python:3.12-slim AS base
 
 # Metadata
 LABEL maintainer="patrick@project25"
@@ -49,7 +49,7 @@ RUN pip install --upgrade pip setuptools wheel && \
 FROM base AS application
 
 # Copy installed packages from dependencies stage
-COPY --from=dependencies /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=dependencies /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=dependencies /usr/local/bin /usr/local/bin
 
 # Create necessary directories
