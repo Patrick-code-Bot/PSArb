@@ -50,7 +50,7 @@ def create_live_config() -> TradingNodeConfig:
 
         # Risk management
         base_notional_per_level=100.0,  # USDT per grid level
-        max_total_notional=1000.0,      # Maximum total exposure (USDT)
+        max_total_notional=8000.0,      # Maximum total exposure (USDT)
         target_leverage=10.0,             # Target leverage (informational)
 
         # Trading parameters

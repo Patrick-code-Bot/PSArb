@@ -82,6 +82,19 @@ class GridPositionState:
     # 可以扩展记录：建仓价、建仓时间等
 
 
+@dataclass
+class PairedOrderTracker:
+    """Track paired PAXG+XAUT orders to detect partial fills"""
+    level: float
+    paxg_order_id: Any
+    xaut_order_id: Any
+    paxg_filled: bool = False
+    xaut_filled: bool = False
+    submit_time: int = 0  # timestamp in nanoseconds
+    paxg_leg: str = ""  # "PAXG_LONG" or "PAXG_SHORT"
+    xaut_leg: str = ""  # "XAUT_LONG" or "XAUT_SHORT"
+
+
 # ==========================
 # 策略主体
 # ==========================
@@ -109,6 +122,10 @@ class PaxgXautGridStrategy(Strategy):
         # 在途订单追踪：order_id -> (level, leg)
         # leg: "PAXG_LONG", "PAXG_SHORT", "XAUT_LONG", "XAUT_SHORT"
         self.working_orders: Dict[Any, tuple[float, str]] = {}  # OrderId type
+
+        # 配对订单追踪：用于检测不平衡成交
+        # Key: 使用唯一标识符 (submit_time + level) 来追踪每对订单
+        self.paired_orders: Dict[int, PairedOrderTracker] = {}
 
         # 累计名义风险
         self.total_notional: float = 0.0
@@ -195,9 +212,45 @@ class PaxgXautGridStrategy(Strategy):
         self.log.warning(f"Order rejected: {event.client_order_id}, reason: {event.reason}")
         self.working_orders.pop(event.client_order_id, None)
 
+        # 检查是否是配对订单中的一个被拒绝
+        # 如果是，需要检查另一侧是否已成交，如果成交了需要平仓
+        self._handle_order_failure(event.client_order_id, "rejected")
+
     def on_order_canceled(self, event) -> None:
         self.log.debug(f"Order canceled: {event.client_order_id}")
         self.working_orders.pop(event.client_order_id, None)
+
+    def _handle_order_failure(self, order_id: Any, reason: str) -> None:
+        """处理订单失败（拒绝/超时）时的配对订单清理"""
+        for submit_time, tracker in list(self.paired_orders.items()):
+            if tracker.paxg_order_id == order_id:
+                self.log.warning(f"PAXG order {reason} for level={tracker.level}")
+                # 如果 XAUT 已经成交，需要平掉
+                if tracker.xaut_filled:
+                    self.log.warning(f"XAUT already filled, closing XAUT position for level={tracker.level}")
+                    state = self.grid_state.get(tracker.level)
+                    if state and state.xaut_pos_id:
+                        self._close_position(state.xaut_pos_id)
+                        state.xaut_pos_id = None
+                else:
+                    # XAUT 还没成交，取消它
+                    self._safe_cancel_order(tracker.xaut_order_id)
+                del self.paired_orders[submit_time]
+                break
+            elif tracker.xaut_order_id == order_id:
+                self.log.warning(f"XAUT order {reason} for level={tracker.level}")
+                # 如果 PAXG 已经成交，需要平掉
+                if tracker.paxg_filled:
+                    self.log.warning(f"PAXG already filled, closing PAXG position for level={tracker.level}")
+                    state = self.grid_state.get(tracker.level)
+                    if state and state.paxg_pos_id:
+                        self._close_position(state.paxg_pos_id)
+                        state.paxg_pos_id = None
+                else:
+                    # PAXG 还没成交，取消它
+                    self._safe_cancel_order(tracker.paxg_order_id)
+                del self.paired_orders[submit_time]
+                break
 
     def on_order_filled(self, event) -> None:
         self.log.info(f"Order filled: {event.client_order_id}")
@@ -205,6 +258,17 @@ class PaxgXautGridStrategy(Strategy):
 
         if level is None:
             return
+
+        # 更新配对订单追踪器
+        for tracker in self.paired_orders.values():
+            if tracker.paxg_order_id == event.client_order_id:
+                tracker.paxg_filled = True
+                self.log.debug(f"PAXG order filled for level={tracker.level}")
+                break
+            elif tracker.xaut_order_id == event.client_order_id:
+                tracker.xaut_filled = True
+                self.log.debug(f"XAUT order filled for level={tracker.level}")
+                break
 
         # 更新持仓状态
         pos = self.cache.position_for_order(event.client_order_id)
@@ -320,6 +384,19 @@ class PaxgXautGridStrategy(Strategy):
         # 记录在途订单
         self.working_orders[paxg_order.client_order_id] = (level, paxg_leg_tag)
         self.working_orders[xaut_order.client_order_id] = (level, xaut_leg_tag)
+
+        # 创建配对订单追踪器
+        submit_time = self.clock.timestamp_ns()
+        tracker = PairedOrderTracker(
+            level=level,
+            paxg_order_id=paxg_order.client_order_id,
+            xaut_order_id=xaut_order.client_order_id,
+            submit_time=submit_time,
+            paxg_leg=paxg_leg_tag,
+            xaut_leg=xaut_leg_tag,
+        )
+        self.paired_orders[submit_time] = tracker
+        self.log.debug(f"Created paired order tracker for level={level}, submit_time={submit_time}")
 
         # 更新总名义风险（两腿）
         self.total_notional += 2 * notional
@@ -446,13 +523,77 @@ class PaxgXautGridStrategy(Strategy):
     # ========== 挂单超时检查 ==========
     def _check_order_timeouts(self) -> None:
         """
-        如果你在 Nautilus 有现成的 “GoodTillTime / IOC” 机制，
-        可以直接用 TIF 替代手动超时逻辑。
-        这里给一个骨架：你可以结合 self.cache.orders / self.clock.now 去实现：
-        - 为 working_orders 多记录一个 timestamp
-        - 超时就 cancel_order(order_id)
+        检查配对订单是否出现部分成交：
+        - 如果一侧成交但另一侧超时未成交，则取消未成交订单并平掉已成交的仓位
+        - 防止累积单边持仓风险
         """
-        pass
+        if not self.paired_orders:
+            return
+
+        current_time = self.clock.timestamp_ns()
+        timeout_ns = int(self.config.order_timeout_sec * 1_000_000_000)
+
+        for submit_time, tracker in list(self.paired_orders.items()):
+            elapsed_time = current_time - tracker.submit_time
+
+            # 检查是否超时
+            if elapsed_time < timeout_ns:
+                continue
+
+            # 检查是否两边都成交了
+            if tracker.paxg_filled and tracker.xaut_filled:
+                # 两边都成交，正常情况，清理追踪器
+                del self.paired_orders[submit_time]
+                self.log.debug(f"Both orders filled for level={tracker.level}, removing tracker")
+                continue
+
+            # 检查是否只有一侧成交（不平衡成交）
+            if tracker.paxg_filled and not tracker.xaut_filled:
+                self.log.warning(
+                    f"IMBALANCED FILL DETECTED: PAXG filled but XAUT not filled for level={tracker.level}. "
+                    f"Canceling XAUT order and closing PAXG position to prevent directional exposure."
+                )
+                # 取消未成交的 XAUT 订单
+                self._safe_cancel_order(tracker.xaut_order_id)
+                # 平掉已成交的 PAXG 仓位
+                state = self.grid_state.get(tracker.level)
+                if state and state.paxg_pos_id:
+                    self._close_position(state.paxg_pos_id)
+                    state.paxg_pos_id = None
+                # 清理追踪器
+                del self.paired_orders[submit_time]
+
+            elif tracker.xaut_filled and not tracker.paxg_filled:
+                self.log.warning(
+                    f"IMBALANCED FILL DETECTED: XAUT filled but PAXG not filled for level={tracker.level}. "
+                    f"Canceling PAXG order and closing XAUT position to prevent directional exposure."
+                )
+                # 取消未成交的 PAXG 订单
+                self._safe_cancel_order(tracker.paxg_order_id)
+                # 平掉已成交的 XAUT 仓位
+                state = self.grid_state.get(tracker.level)
+                if state and state.xaut_pos_id:
+                    self._close_position(state.xaut_pos_id)
+                    state.xaut_pos_id = None
+                # 清理追踪器
+                del self.paired_orders[submit_time]
+
+            elif not tracker.paxg_filled and not tracker.xaut_filled:
+                # 两边都没成交，只是超时了，取消两个订单
+                self.log.info(f"Both orders timed out for level={tracker.level}, canceling both")
+                self._safe_cancel_order(tracker.paxg_order_id)
+                self._safe_cancel_order(tracker.xaut_order_id)
+                del self.paired_orders[submit_time]
+
+    def _safe_cancel_order(self, order_id: Any) -> None:
+        """安全地取消订单（检查订单状态）"""
+        try:
+            order = self.cache.order(order_id)
+            if order and order.is_open:
+                self.cancel_order(order)
+                self.log.debug(f"Canceled order: {order_id}")
+        except Exception as e:
+            self.log.error(f"Error canceling order {order_id}: {e}")
 
 
 # ==========================
