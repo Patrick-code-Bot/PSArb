@@ -127,8 +127,10 @@ class PaxgXautGridStrategy(Strategy):
         # Key: 使用唯一标识符 (submit_time + level) 来追踪每对订单
         self.paired_orders: Dict[int, PairedOrderTracker] = {}
 
-        # 累计名义风险
+        # 累计名义风险（仅计算实际成交的持仓）
         self.total_notional: float = 0.0
+        # 待确认名义风险（已提交但未成交的订单）
+        self.pending_notional: float = 0.0
 
     # ========== 生命周期 ==========
     def on_start(self) -> None:
@@ -222,6 +224,8 @@ class PaxgXautGridStrategy(Strategy):
 
     def _handle_order_failure(self, order_id: Any, reason: str) -> None:
         """处理订单失败（拒绝/超时）时的配对订单清理"""
+        notional = self.config.base_notional_per_level
+
         for submit_time, tracker in list(self.paired_orders.items()):
             if tracker.paxg_order_id == order_id:
                 self.log.warning(f"PAXG order {reason} for level={tracker.level}")
@@ -235,6 +239,9 @@ class PaxgXautGridStrategy(Strategy):
                 else:
                     # XAUT 还没成交，取消它
                     self._safe_cancel_order(tracker.xaut_order_id)
+                # 清理pending_notional
+                self.pending_notional = max(0.0, self.pending_notional - 2 * notional)
+                self.log.info(f"Order failure cleanup, pending_notional={self.pending_notional:.2f}")
                 del self.paired_orders[submit_time]
                 break
             elif tracker.xaut_order_id == order_id:
@@ -249,6 +256,9 @@ class PaxgXautGridStrategy(Strategy):
                 else:
                     # PAXG 还没成交，取消它
                     self._safe_cancel_order(tracker.paxg_order_id)
+                # 清理pending_notional
+                self.pending_notional = max(0.0, self.pending_notional - 2 * notional)
+                self.log.info(f"Order failure cleanup, pending_notional={self.pending_notional:.2f}")
                 del self.paired_orders[submit_time]
                 break
 
@@ -259,15 +269,40 @@ class PaxgXautGridStrategy(Strategy):
         if level is None:
             return
 
-        # 更新配对订单追踪器
+        # 更新配对订单追踪器，检查是否两边都成交了
+        both_filled = False
+        notional = self.config.base_notional_per_level
+
         for tracker in self.paired_orders.values():
             if tracker.paxg_order_id == event.client_order_id:
                 tracker.paxg_filled = True
                 self.log.debug(f"PAXG order filled for level={tracker.level}")
+                # 检查是否两边都成交
+                if tracker.xaut_filled:
+                    both_filled = True
+                    # 从待确认转移到已确认
+                    self.pending_notional = max(0.0, self.pending_notional - 2 * notional)
+                    self.total_notional += 2 * notional
+                    self.log.info(
+                        f"Both orders filled for level={tracker.level}, "
+                        f"moved {2*notional:.2f} from pending to total. "
+                        f"Total={self.total_notional:.2f}, Pending={self.pending_notional:.2f}"
+                    )
                 break
             elif tracker.xaut_order_id == event.client_order_id:
                 tracker.xaut_filled = True
                 self.log.debug(f"XAUT order filled for level={tracker.level}")
+                # 检查是否两边都成交
+                if tracker.paxg_filled:
+                    both_filled = True
+                    # 从待确认转移到已确认
+                    self.pending_notional = max(0.0, self.pending_notional - 2 * notional)
+                    self.total_notional += 2 * notional
+                    self.log.info(
+                        f"Both orders filled for level={tracker.level}, "
+                        f"moved {2*notional:.2f} from pending to total. "
+                        f"Total={self.total_notional:.2f}, Pending={self.pending_notional:.2f}"
+                    )
                 break
 
         # 更新持仓状态
@@ -314,10 +349,14 @@ class PaxgXautGridStrategy(Strategy):
                 continue
 
             if abs_spread > level:
-                # 检查总风险
+                # 检查总风险（包括已成交和待成交的订单）
                 notional = self.config.base_notional_per_level
-                if self.total_notional + 2 * notional > self.config.max_total_notional:
-                    self.log.warning("Max total notional reached, skip new grid.")
+                total_exposure = self.total_notional + self.pending_notional + 2 * notional
+                if total_exposure > self.config.max_total_notional:
+                    self.log.warning(
+                        f"Max total notional reached (total={self.total_notional:.2f}, "
+                        f"pending={self.pending_notional:.2f}, would_add={2*notional:.2f}), skip new grid."
+                    )
                     continue
 
                 self.log.info(f"Opening grid level={level}, spread={spread:.4%}")
@@ -398,8 +437,9 @@ class PaxgXautGridStrategy(Strategy):
         self.paired_orders[submit_time] = tracker
         self.log.debug(f"Created paired order tracker for level={level}, submit_time={submit_time}")
 
-        # 更新总名义风险（两腿）
-        self.total_notional += 2 * notional
+        # 更新待确认名义风险（两腿）- 等待订单成交后再计入total_notional
+        self.pending_notional += 2 * notional
+        self.log.debug(f"Added {2*notional:.2f} to pending_notional, now pending={self.pending_notional:.2f}")
 
     def _close_grid(self, level: float, state: GridPositionState) -> None:
         # 平掉这一档的两条腿
@@ -548,6 +588,8 @@ class PaxgXautGridStrategy(Strategy):
                 continue
 
             # 检查是否只有一侧成交（不平衡成交）
+            notional = self.config.base_notional_per_level
+
             if tracker.paxg_filled and not tracker.xaut_filled:
                 self.log.warning(
                     f"IMBALANCED FILL DETECTED: PAXG filled but XAUT not filled for level={tracker.level}. "
@@ -560,6 +602,10 @@ class PaxgXautGridStrategy(Strategy):
                 if state and state.paxg_pos_id:
                     self._close_position(state.paxg_pos_id)
                     state.paxg_pos_id = None
+                # PAXG成交了，但配对失败，需要从pending中扣除全部（因为XAUT没成交，不会进入total）
+                # 注意：PAXG成交时已经在on_order_filled中等待配对，这里只需要清理pending
+                self.pending_notional = max(0.0, self.pending_notional - 2 * notional)
+                self.log.info(f"Cleaned up imbalanced pair, pending_notional={self.pending_notional:.2f}")
                 # 清理追踪器
                 del self.paired_orders[submit_time]
 
@@ -575,14 +621,20 @@ class PaxgXautGridStrategy(Strategy):
                 if state and state.xaut_pos_id:
                     self._close_position(state.xaut_pos_id)
                     state.xaut_pos_id = None
+                # XAUT成交了，但配对失败，需要从pending中扣除全部
+                self.pending_notional = max(0.0, self.pending_notional - 2 * notional)
+                self.log.info(f"Cleaned up imbalanced pair, pending_notional={self.pending_notional:.2f}")
                 # 清理追踪器
                 del self.paired_orders[submit_time]
 
             elif not tracker.paxg_filled and not tracker.xaut_filled:
-                # 两边都没成交，只是超时了，取消两个订单
+                # 两边都没成交，只是超时了，取消两个订单并清理pending
                 self.log.info(f"Both orders timed out for level={tracker.level}, canceling both")
                 self._safe_cancel_order(tracker.paxg_order_id)
                 self._safe_cancel_order(tracker.xaut_order_id)
+                # 从pending中扣除
+                self.pending_notional = max(0.0, self.pending_notional - 2 * notional)
+                self.log.debug(f"Removed {2*notional:.2f} from pending_notional, now pending={self.pending_notional:.2f}")
                 del self.paired_orders[submit_time]
 
     def _safe_cancel_order(self, order_id: Any) -> None:
