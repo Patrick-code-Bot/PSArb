@@ -342,10 +342,15 @@ class PaxgXautGridStrategy(Strategy):
                 self.log.info(f"Closing grid level={level}, spread={spread:.4%}")
                 self._close_grid(level, state)
 
-        # 2) 再处理“开仓条件”：spread 超过某档且该档没有持仓 -> 开新对冲
+        # 2) 再处理"开仓条件"：spread 超过某档且该档没有持仓/待处理订单 -> 开新对冲
         for i, level in enumerate(levels_sorted):
             state = self.grid_state[level]
+            # 检查是否已有持仓
             if self._grid_has_position(state):
+                continue
+
+            # 检查是否已有pending订单 - 防止重复提交
+            if self._grid_has_pending_orders(level):
                 continue
 
             if abs_spread > level:
@@ -364,6 +369,15 @@ class PaxgXautGridStrategy(Strategy):
 
     def _grid_has_position(self, state: GridPositionState) -> bool:
         return (state.paxg_pos_id is not None) or (state.xaut_pos_id is not None)
+
+    def _grid_has_pending_orders(self, level: float) -> bool:
+        """Check if there are pending orders for the specified grid level"""
+        for tracker in self.paired_orders.values():
+            if tracker.level == level:
+                # If either order is not filled, we have pending orders for this level
+                if not tracker.paxg_filled or not tracker.xaut_filled:
+                    return True
+        return False
 
     # ========== Grid 开仓 / 平仓 ==========
     def _open_grid(self, level: float, spread: float) -> None:

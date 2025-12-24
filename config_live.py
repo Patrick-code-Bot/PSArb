@@ -37,20 +37,20 @@ def create_live_config() -> TradingNodeConfig:
 
         # Grid levels (price spread as percentage of XAUT price)
         # Example: 0.001 = 0.10%, 0.01 = 1%
+        # Reduced to 5 levels to match available balance
         grid_levels=[
             0.0010,  # 0.10%
             0.0020,  # 0.20%
             0.0030,  # 0.30%
             0.0040,  # 0.40%
             0.0050,  # 0.50%
-            0.0060,  # 0.60%
-            0.0080,  # 0.80%
-            0.0100,  # 1.00%
         ],
 
         # Risk management
-        base_notional_per_level=100.0,  # USDT per grid level
-        max_total_notional=8000.0,      # Maximum total exposure (USDT)
+        # Reduced to 50 USDT per level for better balance safety
+        # 5 levels × 2 legs × 50 = 500 USDT notional, ~50 USDT margin at 10x
+        base_notional_per_level=50.0,   # USDT per grid level
+        max_total_notional=500.0,       # Maximum total exposure (USDT)
         target_leverage=10.0,             # Target leverage (informational)
 
         # Trading parameters
