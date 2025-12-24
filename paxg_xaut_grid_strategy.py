@@ -6,8 +6,9 @@ PAXG-XAUT Grid Spread Arbitrage Strategy (NautilusTrader, Bybit single-venue)
 - 实时计算价差 spread = (PAXG - XAUT) / XAUT
 - 使用预设的网格 levels（例如 [0.001, 0.002, ...]）
 - 当 spread 超过某一档 level：高卖贵的、低买便宜的（成对开仓）
+  * 开仓使用市价单（market orders）确保快速成交，建立对冲仓位
 - 当 spread 回落到上一个 level 以下：平掉该档位的对冲仓位
-- 所有下单尽量用挂单（maker），以降低手续费
+  * 平仓使用限价单（limit orders）以更好的价格捕获利润
 - 杠杆建议在 Bybit 侧设置为约 10x，本策略通过 max_total_notional 控制整体风险敞口
 """
 
@@ -19,9 +20,9 @@ from typing import Dict, Optional, List, Tuple, Any
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.enums import OrderSide, TimeInForce
+from nautilus_trader.model.enums import OrderSide, TimeInForce, OrderType
 from nautilus_trader.model.data import QuoteTick
-from nautilus_trader.model.orders import LimitOrder
+from nautilus_trader.model.orders import LimitOrder, MarketOrder
 
 
 # ==========================
@@ -384,6 +385,8 @@ class PaxgXautGridStrategy(Strategy):
         """
         spread > 0: PAXG 贵 → 空 PAXG，多 XAUT
         spread < 0: XAUT 贵 → 空 XAUT，多 PAXG
+
+        使用市价单快速建立对冲仓位，确保两腿同时成交
         """
         paxg_price = self._mid_price(self.paxg_bid, self.paxg_ask)
         xaut_price = self._mid_price(self.xaut_bid, self.xaut_ask)
@@ -409,30 +412,27 @@ class PaxgXautGridStrategy(Strategy):
             paxg_leg_tag = "PAXG_LONG"
             xaut_leg_tag = "XAUT_SHORT"
 
-        # maker price = mid ± offset
-        paxg_price_limit = self._maker_price(self.paxg_bid, self.paxg_ask, paxg_side)
-        xaut_price_limit = self._maker_price(self.xaut_bid, self.xaut_ask, xaut_side)
-
-        # 创建订单
-        paxg_order = self.order_factory.limit(
+        # 使用市价单确保立即成交，建立对冲仓位
+        paxg_order = self.order_factory.market(
             instrument_id=self.paxg_id,
             order_side=paxg_side,
             quantity=self.paxg.make_qty(paxg_qty),
-            price=self.paxg.make_price(paxg_price_limit),
-            time_in_force=TimeInForce.GTC,
         )
 
-        xaut_order = self.order_factory.limit(
+        xaut_order = self.order_factory.market(
             instrument_id=self.xaut_id,
             order_side=xaut_side,
             quantity=self.xaut.make_qty(xaut_qty),
-            price=self.xaut.make_price(xaut_price_limit),
-            time_in_force=TimeInForce.GTC,
         )
 
         # 提交订单
         self.submit_order(paxg_order)
         self.submit_order(xaut_order)
+
+        self.log.info(
+            f"Submitted MARKET orders for grid level={level}: "
+            f"{paxg_leg_tag} qty={paxg_qty:.6f}, {xaut_leg_tag} qty={xaut_qty:.6f}"
+        )
 
         # 记录在途订单
         self.working_orders[paxg_order.client_order_id] = (level, paxg_leg_tag)
@@ -472,6 +472,10 @@ class PaxgXautGridStrategy(Strategy):
             self._close_grid(level, state)
 
     def _close_position(self, pos_id: Any) -> None:  # PositionId type
+        """
+        使用限价单平仓，以更好的价格捕获利润
+        Close positions with limit orders to capture profit at favorable maker prices
+        """
         pos = self.cache.position(pos_id)
         if pos is None:
             return
@@ -578,6 +582,7 @@ class PaxgXautGridStrategy(Strategy):
     def _check_order_timeouts(self) -> None:
         """
         检查配对订单是否出现部分成交：
+        - 开仓使用市价单，通常会立即成交，超时主要作为安全机制
         - 如果一侧成交但另一侧超时未成交，则取消未成交订单并平掉已成交的仓位
         - 防止累积单边持仓风险
         """
