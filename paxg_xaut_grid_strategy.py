@@ -73,6 +73,11 @@ class PaxgXautGridConfig(StrategyConfig, frozen=True):
     # Startup delay in seconds before processing grids (allows position reconciliation to complete)
     startup_delay_sec: float = 10.0
 
+    # Manual initial notional override (set this when restarting with existing positions)
+    # Bybit doesn't report external positions to NautilusTrader, so manual override is needed
+    # Set to 0.0 to disable, or set to actual exposure (e.g., 6000.0) when positions exist
+    initial_notional_override: float = 0.0
+
 
 # ==========================
 # 内部数据结构
@@ -193,13 +198,35 @@ class PaxgXautGridStrategy(Strategy):
         """
         Sync existing positions from exchange on startup.
         
-        Uses multiple NautilusTrader methods to detect existing positions:
-        1. cache.positions() - positions tracked by NautilusTrader
-        2. cache.positions_open() - explicitly open positions  
-        3. portfolio.net_exposure() - net exposure by instrument (uses current prices)
+        Uses multiple methods to detect existing positions:
+        1. Manual override (initial_notional_override) - most reliable for Bybit
+        2. cache.positions_open() - positions tracked by NautilusTrader
+        3. portfolio.net_exposure() - net exposure by instrument
+        4. cache.positions() - fallback
         
-        This prevents opening duplicate grids when the bot restarts with existing positions.
+        Note: Bybit doesn't report external positions to NautilusTrader's reconciliation,
+        so manual override is the most reliable method for restarts with existing positions.
         """
+        # Method 0: Check for manual override first (most reliable for Bybit)
+        if self.config.initial_notional_override > 0:
+            self.total_notional = self.config.initial_notional_override
+            notional_per_grid = 2 * self.config.base_notional_per_level
+            estimated_grids = int(self.total_notional / notional_per_grid) if notional_per_grid > 0 else 0
+            
+            levels_sorted = sorted(self.config.grid_levels)
+            for i, level in enumerate(levels_sorted):
+                if i < estimated_grids:
+                    state = self.grid_state[level]
+                    state.paxg_pos_id = "MANUAL_OVERRIDE"
+                    state.xaut_pos_id = "MANUAL_OVERRIDE"
+                    self.log.info(f"Marked grid level={level} as occupied (manual override)")
+            
+            self.log.warning(
+                f"⚠️ STARTUP SYNC (MANUAL): initial_notional_override={self.total_notional:.2f}. "
+                f"Estimated {estimated_grids} grid(s) filled. Will not open new grids beyond max."
+            )
+            return
+
         paxg_pos = None
         xaut_pos = None
         paxg_notional = 0.0
