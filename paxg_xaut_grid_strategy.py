@@ -154,6 +154,9 @@ class PaxgXautGridStrategy(Strategy):
         for level in self.config.grid_levels:
             self.grid_state[level] = GridPositionState(level=level)
 
+        # Sync existing positions from exchange to prevent duplicate grid openings on restart
+        self._sync_existing_positions()
+
         if self.config.auto_subscribe:
             # Subscribe to quote ticks for both instruments
             self.subscribe_quote_ticks(instrument_id=self.paxg_id)
@@ -173,6 +176,73 @@ class PaxgXautGridStrategy(Strategy):
             self.cancel_order(order_id)
         # 可以按需选择是否强平所有持仓
         # self.flatten_all()
+
+    def _sync_existing_positions(self) -> None:
+        """
+        Sync existing positions from exchange on startup.
+        
+        This prevents opening duplicate grids when the bot restarts with existing positions.
+        We calculate total_notional from actual positions and mark grid levels as occupied.
+        """
+        paxg_pos = None
+        xaut_pos = None
+        paxg_notional = 0.0
+        xaut_notional = 0.0
+
+        # Find existing positions for our instruments
+        for pos in self.cache.positions():
+            if pos.instrument_id == self.paxg_id and pos.is_open:
+                paxg_pos = pos
+                # Use average entry price for notional calculation
+                paxg_notional = float(pos.quantity) * float(pos.avg_px_open)
+                self.log.info(
+                    f"Found existing PAXG position: qty={pos.quantity}, "
+                    f"side={'LONG' if pos.is_long else 'SHORT'}, "
+                    f"avg_px={pos.avg_px_open}, notional={paxg_notional:.2f}"
+                )
+            elif pos.instrument_id == self.xaut_id and pos.is_open:
+                xaut_pos = pos
+                xaut_notional = float(pos.quantity) * float(pos.avg_px_open)
+                self.log.info(
+                    f"Found existing XAUT position: qty={pos.quantity}, "
+                    f"side={'LONG' if pos.is_long else 'SHORT'}, "
+                    f"avg_px={pos.avg_px_open}, notional={xaut_notional:.2f}"
+                )
+
+        # If we have existing positions, sync the state
+        if paxg_pos is not None or xaut_pos is not None:
+            # Calculate total notional from existing positions
+            self.total_notional = paxg_notional + xaut_notional
+            self.log.info(
+                f"Synced existing positions: total_notional={self.total_notional:.2f} "
+                f"(PAXG={paxg_notional:.2f}, XAUT={xaut_notional:.2f})"
+            )
+
+            # Estimate how many grid levels are filled based on notional
+            # Each grid has 2 legs (PAXG + XAUT), so divide by 2 * base_notional
+            notional_per_grid = 2 * self.config.base_notional_per_level
+            estimated_grids = int(self.total_notional / notional_per_grid) if notional_per_grid > 0 else 0
+            
+            # Mark the lowest N grid levels as having positions
+            # This prevents opening new grids at those levels
+            levels_sorted = sorted(self.config.grid_levels)
+            for i, level in enumerate(levels_sorted):
+                if i < estimated_grids:
+                    state = self.grid_state[level]
+                    # Mark as having positions (using position IDs if available)
+                    if paxg_pos is not None:
+                        state.paxg_pos_id = paxg_pos.id
+                    if xaut_pos is not None:
+                        state.xaut_pos_id = xaut_pos.id
+                    self.log.info(f"Marked grid level={level} as occupied from existing positions")
+
+            self.log.warning(
+                f"⚠️ STARTUP SYNC: Found {estimated_grids} grid(s) worth of existing positions. "
+                f"total_notional set to {self.total_notional:.2f}. "
+                f"No new grids will be opened until spread closes and positions are reduced."
+            )
+        else:
+            self.log.info("No existing positions found, starting fresh.")
 
     # ========== 行情处理 ==========
     def on_quote_tick(self, tick: QuoteTick) -> None:
