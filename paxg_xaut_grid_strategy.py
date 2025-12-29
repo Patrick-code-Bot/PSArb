@@ -70,6 +70,9 @@ class PaxgXautGridConfig(StrategyConfig, frozen=True):
     # 是否在启动时自动订阅行情
     auto_subscribe: bool = True
 
+    # Startup delay in seconds before processing grids (allows position reconciliation to complete)
+    startup_delay_sec: float = 10.0
+
 
 # ==========================
 # 内部数据结构
@@ -133,8 +136,10 @@ class PaxgXautGridStrategy(Strategy):
         # 待确认名义风险（已提交但未成交的订单）
         self.pending_notional: float = 0.0
 
-        # Flag to track if we've synced existing positions (done on first quote tick)
+        # Flag to track if we've synced existing positions (done after startup delay)
         self._positions_synced: bool = False
+        # Timestamp when strategy started (for startup delay calculation)
+        self._start_time_ns: int = 0
 
     # ========== 生命周期 ==========
     def on_start(self) -> None:
@@ -168,8 +173,12 @@ class PaxgXautGridStrategy(Strategy):
                 f"Subscribed to quote ticks: PAXG={self.paxg_id}, XAUT={self.xaut_id}"
             )
 
+        # Record start time for startup delay calculation
+        self._start_time_ns = self.clock.timestamp_ns()
+
         self.log.info(
-            f"Strategy initialized with grid_levels={self.config.grid_levels}"
+            f"Strategy initialized with grid_levels={self.config.grid_levels}, "
+            f"startup_delay={self.config.startup_delay_sec}s"
         )
 
     def on_stop(self) -> None:
@@ -260,7 +269,13 @@ class PaxgXautGridStrategy(Strategy):
         if not self._has_valid_quotes():
             return
 
-        # Sync existing positions on first valid quote tick
+        # Wait for startup delay before processing (allows position reconciliation to complete)
+        elapsed_ns = self.clock.timestamp_ns() - self._start_time_ns
+        startup_delay_ns = int(self.config.startup_delay_sec * 1_000_000_000)
+        if elapsed_ns < startup_delay_ns:
+            return  # Still in startup delay period
+
+        # Sync existing positions after startup delay
         # This ensures NautilusTrader has finished reconciling positions from exchange
         if not self._positions_synced:
             self._sync_existing_positions()
