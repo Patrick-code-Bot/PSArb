@@ -36,28 +36,33 @@ def create_live_config() -> TradingNodeConfig:
         xaut_instrument_id="XAUTUSDT-LINEAR.BYBIT",
 
         # Grid levels (price spread as percentage of XAUT price)
-        # Example: 0.001 = 0.10%, 0.01 = 1%
-        # Reduced to 5 levels to match available balance
+        # Optimized for $2500 capital with 10x leverage
+        # 8 levels with 0.5% spacing to match PAXG-XAUT volatility
+        # Higher levels (3.0%-4.0%) capture current stable spread at 0.37%-0.39%
         grid_levels=[
-            0.0010,  # 0.10%
-            0.0020,  # 0.20%
-            0.0030,  # 0.30%
-            0.0040,  # 0.40%
-            0.0050,  # 0.50%
+            0.0050,  # 0.50% - First level
+            0.0100,  # 1.00% - Second level
+            0.0150,  # 1.50% - Third level
+            0.0200,  # 2.00% - Fourth level
+            0.0250,  # 2.50% - Fifth level
+            0.0300,  # 3.00% - Sixth level (captures current market)
+            0.0350,  # 3.50% - Seventh level
+            0.0400,  # 4.00% - Eighth level
         ],
 
-        # Risk management
-        # Reduced to 50 USDT per level for better balance safety
-        # 5 levels × 2 legs × 50 = 500 USDT notional, ~50 USDT margin at 10x
-        base_notional_per_level=50.0,   # USDT per grid level
-        max_total_notional=500.0,       # Maximum total exposure (USDT)
-        target_leverage=10.0,             # Target leverage (informational)
+        # Risk management - Optimized for $2500 USDT capital
+        # $600 per side = $1200 total per grid
+        # 8 grids max = $9600 notional = $960 margin at 10x (38% utilization)
+        # Leaves $1540 margin (62%) as safety buffer
+        base_notional_per_level=600.0,   # USDT per side (each leg)
+        max_total_notional=12000.0,      # Maximum total exposure allows 10 grids with buffer
+        target_leverage=10.0,            # Target leverage (set on Bybit exchange)
 
         # Trading parameters
-        maker_offset_bps=2.0,             # 0.02% offset from mid price
-        order_timeout_sec=5.0,            # Order timeout in seconds
-        rebalance_threshold_bps=20.0,    # 0.20% rebalance threshold
-        extreme_spread_stop=0.015,        # 1.5% extreme spread stop
+        maker_offset_bps=2.0,            # 0.02% offset from mid price
+        order_timeout_sec=5.0,           # Order timeout in seconds
+        rebalance_threshold_bps=20.0,   # 0.20% rebalance threshold
+        extreme_spread_stop=0.050,       # 5.0% extreme spread stop (above highest grid at 4.0%)
 
         # Features
         enable_high_levels=True,
