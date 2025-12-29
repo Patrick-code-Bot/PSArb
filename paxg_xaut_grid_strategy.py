@@ -195,17 +195,19 @@ class PaxgXautGridStrategy(Strategy):
         
         This prevents opening duplicate grids when the bot restarts with existing positions.
         We calculate total_notional from actual positions and mark grid levels as occupied.
+        
+        Note: NautilusTrader's cache.positions() may not see positions from previous sessions,
+        so we also check account margin usage as a fallback detection method.
         """
         paxg_pos = None
         xaut_pos = None
         paxg_notional = 0.0
         xaut_notional = 0.0
 
-        # Find existing positions for our instruments
+        # Method 1: Check NautilusTrader cached positions
         for pos in self.cache.positions():
             if pos.instrument_id == self.paxg_id and pos.is_open:
                 paxg_pos = pos
-                # Use average entry price for notional calculation
                 paxg_notional = float(pos.quantity) * float(pos.avg_px_open)
                 self.log.info(
                     f"Found existing PAXG position: qty={pos.quantity}, "
@@ -221,27 +223,56 @@ class PaxgXautGridStrategy(Strategy):
                     f"avg_px={pos.avg_px_open}, notional={xaut_notional:.2f}"
                 )
 
-        # If we have existing positions, sync the state
+        # Method 2: If no positions found, check account margin as fallback
+        # Margin usage indicates existing positions even if NautilusTrader doesn't track them
+        if paxg_pos is None and xaut_pos is None:
+            try:
+                # Get account state to check margin usage
+                accounts = self.cache.accounts()
+                for account in accounts:
+                    # Check if there's significant margin being used (indicates existing positions)
+                    # With 10x leverage, margin = notional / 10
+                    # So if margin > threshold, we have positions
+                    for margin in account.margins():
+                        initial_margin = float(margin.initial)
+                        if initial_margin > 50.0:  # More than $50 margin = significant positions
+                            # Estimate notional from margin (assuming 10x leverage)
+                            estimated_notional = initial_margin * self.config.target_leverage
+                            self.log.warning(
+                                f"⚠️ MARGIN DETECTED: Account has {initial_margin:.2f} USDT initial margin. "
+                                f"Estimated position notional: {estimated_notional:.2f} USDT"
+                            )
+                            # Set total_notional to prevent opening new grids
+                            # Use max_total_notional to be safe - don't open any new grids
+                            self.total_notional = self.config.max_total_notional
+                            self.log.warning(
+                                f"⚠️ STARTUP SYNC: Setting total_notional to max ({self.total_notional:.2f}) "
+                                f"to prevent duplicate grid openings. Existing positions detected via margin."
+                            )
+                            # Mark all grid levels as occupied to prevent any new openings
+                            for level in self.config.grid_levels:
+                                state = self.grid_state[level]
+                                state.paxg_pos_id = "EXTERNAL"  # Marker for external positions
+                                state.xaut_pos_id = "EXTERNAL"
+                            return
+            except Exception as e:
+                self.log.warning(f"Error checking account margin: {e}")
+
+        # If we found positions via cache, sync the state
         if paxg_pos is not None or xaut_pos is not None:
-            # Calculate total notional from existing positions
             self.total_notional = paxg_notional + xaut_notional
             self.log.info(
                 f"Synced existing positions: total_notional={self.total_notional:.2f} "
                 f"(PAXG={paxg_notional:.2f}, XAUT={xaut_notional:.2f})"
             )
 
-            # Estimate how many grid levels are filled based on notional
-            # Each grid has 2 legs (PAXG + XAUT), so divide by 2 * base_notional
             notional_per_grid = 2 * self.config.base_notional_per_level
             estimated_grids = int(self.total_notional / notional_per_grid) if notional_per_grid > 0 else 0
             
-            # Mark the lowest N grid levels as having positions
-            # This prevents opening new grids at those levels
             levels_sorted = sorted(self.config.grid_levels)
             for i, level in enumerate(levels_sorted):
                 if i < estimated_grids:
                     state = self.grid_state[level]
-                    # Mark as having positions (using position IDs if available)
                     if paxg_pos is not None:
                         state.paxg_pos_id = paxg_pos.id
                     if xaut_pos is not None:
