@@ -50,12 +50,12 @@ def create_live_config() -> TradingNodeConfig:
             0.0050,  # 0.50% - Eighth level
         ],
 
-        # Risk management - Optimized for $2500 USDT capital
-        # $600 per side = $1200 total per grid
-        # 8 grids max = $9600 notional = $960 margin at 10x (38% utilization)
-        # Leaves $1540 margin (62%) as safety buffer
-        base_notional_per_level=600.0,   # USDT per side (each leg)
-        max_total_notional=12000.0,      # Maximum total exposure allows 10 grids with buffer
+        # Risk management - Adjusted for available balance with existing positions
+        # $300 per side = $600 total per grid
+        # 8 grids max = $4800 notional = $480 margin at 10x
+        # Works with existing ~$600 margin in use, total ~$1080 margin needed
+        base_notional_per_level=300.0,   # USDT per side (each leg)
+        max_total_notional=6000.0,       # Maximum total exposure allows flexibility
         target_leverage=10.0,            # Target leverage (set on Bybit exchange)
 
         # Trading parameters
