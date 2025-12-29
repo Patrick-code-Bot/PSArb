@@ -37,17 +37,17 @@ def create_live_config() -> TradingNodeConfig:
 
         # Grid levels (price spread as percentage of XAUT price)
         # Optimized for $2500 capital with 10x leverage
-        # 8 levels with 0.5% spacing to match PAXG-XAUT volatility
-        # Higher levels (3.0%-4.0%) capture current stable spread at 0.37%-0.39%
+        # 8 levels with fine 0.05% spacing to capture current 0.37%-0.39% spread
+        # Levels 0.30%-0.35% will immediately trade at current market conditions
         grid_levels=[
-            0.0050,  # 0.50% - First level
-            0.0100,  # 1.00% - Second level
-            0.0150,  # 1.50% - Third level
-            0.0200,  # 2.00% - Fourth level
-            0.0250,  # 2.50% - Fifth level
-            0.0300,  # 3.00% - Sixth level (captures current market)
-            0.0350,  # 3.50% - Seventh level
-            0.0400,  # 4.00% - Eighth level
+            0.0010,  # 0.10% - First level
+            0.0015,  # 0.15% - Second level
+            0.0020,  # 0.20% - Third level
+            0.0025,  # 0.25% - Fourth level
+            0.0030,  # 0.30% - Fifth level (captures current spread!)
+            0.0035,  # 0.35% - Sixth level (captures current spread!)
+            0.0040,  # 0.40% - Seventh level (near current spread)
+            0.0050,  # 0.50% - Eighth level
         ],
 
         # Risk management - Optimized for $2500 USDT capital
@@ -59,10 +59,10 @@ def create_live_config() -> TradingNodeConfig:
         target_leverage=10.0,            # Target leverage (set on Bybit exchange)
 
         # Trading parameters
-        maker_offset_bps=2.0,            # 0.02% offset from mid price
+        maker_offset_bps=1.0,            # 0.01% offset from mid price (tighter for fine grids)
         order_timeout_sec=5.0,           # Order timeout in seconds
-        rebalance_threshold_bps=20.0,   # 0.20% rebalance threshold
-        extreme_spread_stop=0.050,       # 5.0% extreme spread stop (above highest grid at 4.0%)
+        rebalance_threshold_bps=10.0,   # 0.10% rebalance threshold (matches grid spacing)
+        extreme_spread_stop=0.010,       # 1.0% extreme spread stop (above highest grid at 0.5%)
 
         # Features
         enable_high_levels=True,
