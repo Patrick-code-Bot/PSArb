@@ -272,11 +272,13 @@ class PaxgXautGridStrategy(Strategy):
 
         # 更新配对订单追踪器，检查是否两边都成交了
         both_filled = False
+        tracker_submit_time = None  # Track which tracker to potentially remove
         notional = self.config.base_notional_per_level
 
-        for tracker in self.paired_orders.values():
+        for submit_time, tracker in self.paired_orders.items():
             if tracker.paxg_order_id == event.client_order_id:
                 tracker.paxg_filled = True
+                tracker_submit_time = submit_time
                 self.log.debug(f"PAXG order filled for level={tracker.level}")
                 # 检查是否两边都成交
                 if tracker.xaut_filled:
@@ -292,6 +294,7 @@ class PaxgXautGridStrategy(Strategy):
                 break
             elif tracker.xaut_order_id == event.client_order_id:
                 tracker.xaut_filled = True
+                tracker_submit_time = submit_time
                 self.log.debug(f"XAUT order filled for level={tracker.level}")
                 # 检查是否两边都成交
                 if tracker.paxg_filled:
@@ -321,6 +324,16 @@ class PaxgXautGridStrategy(Strategy):
             state.xaut_pos_id = pos.id if pos is not None else None
         elif leg == "XAUT_SHORT":
             state.xaut_pos_id = pos.id if pos is not None else None
+
+        # Clean up tracker immediately when both orders filled AND positions are set
+        # This prevents the race condition while ensuring positions are tracked
+        if both_filled and tracker_submit_time is not None:
+            if state.paxg_pos_id is not None and state.xaut_pos_id is not None:
+                del self.paired_orders[tracker_submit_time]
+                self.log.debug(
+                    f"Removed tracker for level={level} after both fills confirmed "
+                    f"and positions set (PAXG={state.paxg_pos_id}, XAUT={state.xaut_pos_id})"
+                )
 
     # ========== 网格逻辑 ==========
     def _process_grids(self, spread: float) -> None:
@@ -372,12 +385,15 @@ class PaxgXautGridStrategy(Strategy):
         return (state.paxg_pos_id is not None) or (state.xaut_pos_id is not None)
 
     def _grid_has_pending_orders(self, level: float) -> bool:
-        """Check if there are pending orders for the specified grid level"""
+        """Check if there are pending or recently-filled orders for the specified grid level.
+        
+        Returns True if ANY tracker exists for this level, regardless of fill status.
+        This prevents race conditions where both orders fill but position IDs haven't
+        been updated yet in grid_state, which could cause duplicate grid openings.
+        """
         for tracker in self.paired_orders.values():
             if tracker.level == level:
-                # If either order is not filled, we have pending orders for this level
-                if not tracker.paxg_filled or not tracker.xaut_filled:
-                    return True
+                return True  # Any tracker for this level = don't open new grid
         return False
 
     # ========== Grid 开仓 / 平仓 ==========
