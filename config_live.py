@@ -73,9 +73,10 @@ def create_live_config() -> TradingNodeConfig:
 
         # IMPORTANT: Set this when restarting with existing positions!
         # Bybit doesn't report external positions to NautilusTrader.
-        # Check Bybit position page and set to actual exposure (e.g., 6000.0)
+        # Check Bybit position page and set to actual exposure.
+        # Current: ~$6000 total exposure (PAXG + XAUT positions)
         # Set to 0.0 when starting fresh with no positions.
-        initial_notional_override=0.0,
+        initial_notional_override=6000.0,
 
         # Strategy identification (required for multiple strategy instances)
         order_id_tag="001",
