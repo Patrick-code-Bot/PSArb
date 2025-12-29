@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from nautilus_trader.adapters.bybit.config import BybitDataClientConfig, BybitExecClientConfig
+from nautilus_trader.adapters.bybit.common.enums import BybitPositionMode
 from nautilus_trader.adapters.bybit.factories import BybitLiveDataClientFactory, BybitLiveExecClientFactory
 from nautilus_trader.config import (
     InstrumentProviderConfig,
@@ -104,6 +105,9 @@ def create_live_config() -> TradingNodeConfig:
             load_ids=None,
         ),
         testnet=False,  # Set to True for testnet
+        # Position mode for linear perpetuals - MERGED_SINGLE is Bybit's One-Way Mode
+        # This must match your Bybit account settings
+        position_mode=BybitPositionMode.MERGED_SINGLE,
     )
 
     # Logging configuration
