@@ -193,99 +193,100 @@ class PaxgXautGridStrategy(Strategy):
         """
         Sync existing positions from exchange on startup.
         
-        This prevents opening duplicate grids when the bot restarts with existing positions.
-        We calculate total_notional from actual positions and mark grid levels as occupied.
+        Uses multiple NautilusTrader methods to detect existing positions:
+        1. cache.positions() - positions tracked by NautilusTrader
+        2. cache.positions_open() - explicitly open positions  
+        3. portfolio.net_exposure() - net exposure by instrument (uses current prices)
         
-        Note: NautilusTrader's cache.positions() may not see positions from previous sessions,
-        so we also check account margin usage as a fallback detection method.
+        This prevents opening duplicate grids when the bot restarts with existing positions.
         """
         paxg_pos = None
         xaut_pos = None
         paxg_notional = 0.0
         xaut_notional = 0.0
 
-        # Method 1: Check NautilusTrader cached positions
-        for pos in self.cache.positions():
-            if pos.instrument_id == self.paxg_id and pos.is_open:
+        # Method 1: Check cache.positions_open() for open positions
+        for pos in self.cache.positions_open():
+            if pos.instrument_id == self.paxg_id:
                 paxg_pos = pos
                 paxg_notional = float(pos.quantity) * float(pos.avg_px_open)
                 self.log.info(
-                    f"Found existing PAXG position: qty={pos.quantity}, "
-                    f"side={'LONG' if pos.is_long else 'SHORT'}, "
-                    f"avg_px={pos.avg_px_open}, notional={paxg_notional:.2f}"
+                    f"[cache.positions_open] Found PAXG position: qty={pos.quantity}, "
+                    f"side={'LONG' if pos.is_long else 'SHORT'}, notional={paxg_notional:.2f}"
                 )
-            elif pos.instrument_id == self.xaut_id and pos.is_open:
+            elif pos.instrument_id == self.xaut_id:
                 xaut_pos = pos
                 xaut_notional = float(pos.quantity) * float(pos.avg_px_open)
                 self.log.info(
-                    f"Found existing XAUT position: qty={pos.quantity}, "
-                    f"side={'LONG' if pos.is_long else 'SHORT'}, "
-                    f"avg_px={pos.avg_px_open}, notional={xaut_notional:.2f}"
+                    f"[cache.positions_open] Found XAUT position: qty={pos.quantity}, "
+                    f"side={'LONG' if pos.is_long else 'SHORT'}, notional={xaut_notional:.2f}"
                 )
 
-        # Method 2: If no positions found, check account margin as fallback
-        # Margin usage indicates existing positions even if NautilusTrader doesn't track them
+        # Method 2: If no positions found, try portfolio.net_exposure()
+        # This uses current market prices and may detect positions not in cache
         if paxg_pos is None and xaut_pos is None:
             try:
-                # Get account state to check margin usage
-                accounts = self.cache.accounts()
-                for account in accounts:
-                    # Check if there's significant margin being used (indicates existing positions)
-                    # With 10x leverage, margin = notional / 10
-                    # So if margin > threshold, we have positions
-                    for margin in account.margins():
-                        initial_margin = float(margin.initial)
-                        if initial_margin > 50.0:  # More than $50 margin = significant positions
-                            # Estimate notional from margin (assuming 10x leverage)
-                            estimated_notional = initial_margin * self.config.target_leverage
-                            self.log.warning(
-                                f"⚠️ MARGIN DETECTED: Account has {initial_margin:.2f} USDT initial margin. "
-                                f"Estimated position notional: {estimated_notional:.2f} USDT"
-                            )
-                            # Set total_notional to prevent opening new grids
-                            # Use max_total_notional to be safe - don't open any new grids
-                            self.total_notional = self.config.max_total_notional
-                            self.log.warning(
-                                f"⚠️ STARTUP SYNC: Setting total_notional to max ({self.total_notional:.2f}) "
-                                f"to prevent duplicate grid openings. Existing positions detected via margin."
-                            )
-                            # Mark all grid levels as occupied to prevent any new openings
-                            for level in self.config.grid_levels:
-                                state = self.grid_state[level]
-                                state.paxg_pos_id = "EXTERNAL"  # Marker for external positions
-                                state.xaut_pos_id = "EXTERNAL"
-                            return
+                # Get net exposure from portfolio (uses current prices)
+                paxg_exposure = self.portfolio.net_exposure(self.paxg_id)
+                xaut_exposure = self.portfolio.net_exposure(self.xaut_id)
+                
+                if paxg_exposure is not None:
+                    paxg_notional = abs(float(paxg_exposure))
+                    if paxg_notional > 0:
+                        self.log.info(f"[portfolio.net_exposure] PAXG exposure: {paxg_notional:.2f}")
+                
+                if xaut_exposure is not None:
+                    xaut_notional = abs(float(xaut_exposure))
+                    if xaut_notional > 0:
+                        self.log.info(f"[portfolio.net_exposure] XAUT exposure: {xaut_notional:.2f}")
+                        
             except Exception as e:
-                self.log.warning(f"Error checking account margin: {e}")
+                self.log.warning(f"Error checking portfolio.net_exposure: {e}")
 
-        # If we found positions via cache, sync the state
-        if paxg_pos is not None or xaut_pos is not None:
-            self.total_notional = paxg_notional + xaut_notional
-            self.log.info(
-                f"Synced existing positions: total_notional={self.total_notional:.2f} "
-                f"(PAXG={paxg_notional:.2f}, XAUT={xaut_notional:.2f})"
-            )
+        # Method 3: Also check cache.positions() as fallback
+        if paxg_pos is None and xaut_pos is None and paxg_notional == 0 and xaut_notional == 0:
+            for pos in self.cache.positions():
+                if pos.instrument_id == self.paxg_id and pos.is_open:
+                    paxg_pos = pos
+                    paxg_notional = float(pos.quantity) * float(pos.avg_px_open)
+                    self.log.info(f"[cache.positions] Found PAXG: notional={paxg_notional:.2f}")
+                elif pos.instrument_id == self.xaut_id and pos.is_open:
+                    xaut_pos = pos
+                    xaut_notional = float(pos.quantity) * float(pos.avg_px_open)
+                    self.log.info(f"[cache.positions] Found XAUT: notional={xaut_notional:.2f}")
 
+        # Calculate total and sync state
+        total_detected = paxg_notional + xaut_notional
+        
+        if total_detected > 0:
+            self.total_notional = total_detected
+            
+            # Estimate grid levels filled
             notional_per_grid = 2 * self.config.base_notional_per_level
             estimated_grids = int(self.total_notional / notional_per_grid) if notional_per_grid > 0 else 0
             
+            # Mark grid levels as occupied
             levels_sorted = sorted(self.config.grid_levels)
             for i, level in enumerate(levels_sorted):
                 if i < estimated_grids:
                     state = self.grid_state[level]
                     if paxg_pos is not None:
                         state.paxg_pos_id = paxg_pos.id
+                    else:
+                        state.paxg_pos_id = "DETECTED"  # Marker for detected but not tracked
                     if xaut_pos is not None:
                         state.xaut_pos_id = xaut_pos.id
-                    self.log.info(f"Marked grid level={level} as occupied from existing positions")
+                    else:
+                        state.xaut_pos_id = "DETECTED"
+                    self.log.info(f"Marked grid level={level} as occupied")
 
             self.log.warning(
-                f"⚠️ STARTUP SYNC: Found {estimated_grids} grid(s) worth of existing positions. "
-                f"total_notional set to {self.total_notional:.2f}. "
-                f"No new grids will be opened until spread closes and positions are reduced."
+                f"⚠️ STARTUP SYNC: Detected {estimated_grids} grid(s) of existing exposure. "
+                f"total_notional={self.total_notional:.2f} (PAXG={paxg_notional:.2f}, XAUT={xaut_notional:.2f}). "
+                f"Will not open new grids beyond max_total_notional."
             )
         else:
-            self.log.info("No existing positions found, starting fresh.")
+            self.log.info("No existing positions detected via cache or portfolio, starting fresh.")
 
     # ========== 行情处理 ==========
     def on_quote_tick(self, tick: QuoteTick) -> None:
@@ -347,6 +348,56 @@ class PaxgXautGridStrategy(Strategy):
     def on_order_canceled(self, event) -> None:
         self.log.debug(f"Order canceled: {event.client_order_id}")
         self.working_orders.pop(event.client_order_id, None)
+
+    # ========== 仓位事件处理 (NautilusTrader内置) ==========
+    def on_position_opened(self, event) -> None:
+        """Handle position opened events - updates total_notional tracking"""
+        self.log.info(
+            f"Position opened: {event.instrument_id}, "
+            f"qty={event.quantity}, side={event.entry}, "
+            f"avg_px={event.avg_px_open}"
+        )
+        # Update notional tracking based on actual positions
+        self._update_notional_from_portfolio()
+
+    def on_position_changed(self, event) -> None:
+        """Handle position changed events - updates total_notional tracking"""
+        self.log.debug(
+            f"Position changed: {event.instrument_id}, "
+            f"qty={event.quantity}, unrealized_pnl={event.unrealized_pnl}"
+        )
+
+    def on_position_closed(self, event) -> None:
+        """Handle position closed events - reduces total_notional tracking"""
+        self.log.info(
+            f"Position closed: {event.instrument_id}, "
+            f"realized_pnl={event.realized_pnl}"
+        )
+        # Update notional tracking based on actual positions
+        self._update_notional_from_portfolio()
+
+    def _update_notional_from_portfolio(self) -> None:
+        """Update total_notional based on actual portfolio positions"""
+        try:
+            paxg_notional = 0.0
+            xaut_notional = 0.0
+            
+            # Calculate from open positions
+            for pos in self.cache.positions_open():
+                if pos.instrument_id == self.paxg_id:
+                    paxg_notional = float(pos.quantity) * float(pos.avg_px_open)
+                elif pos.instrument_id == self.xaut_id:
+                    xaut_notional = float(pos.quantity) * float(pos.avg_px_open)
+            
+            new_total = paxg_notional + xaut_notional
+            if abs(new_total - self.total_notional) > 1.0:  # Only log if significant change
+                self.log.info(
+                    f"Updated total_notional: {self.total_notional:.2f} -> {new_total:.2f} "
+                    f"(PAXG={paxg_notional:.2f}, XAUT={xaut_notional:.2f})"
+                )
+            self.total_notional = new_total
+        except Exception as e:
+            self.log.warning(f"Error updating notional from portfolio: {e}")
 
     def _handle_order_failure(self, order_id: Any, reason: str) -> None:
         """处理订单失败（拒绝/超时）时的配对订单清理"""
