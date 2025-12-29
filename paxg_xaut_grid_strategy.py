@@ -133,6 +133,9 @@ class PaxgXautGridStrategy(Strategy):
         # 待确认名义风险（已提交但未成交的订单）
         self.pending_notional: float = 0.0
 
+        # Flag to track if we've synced existing positions (done on first quote tick)
+        self._positions_synced: bool = False
+
     # ========== 生命周期 ==========
     def on_start(self) -> None:
         self.log.info(
@@ -154,8 +157,8 @@ class PaxgXautGridStrategy(Strategy):
         for level in self.config.grid_levels:
             self.grid_state[level] = GridPositionState(level=level)
 
-        # Sync existing positions from exchange to prevent duplicate grid openings on restart
-        self._sync_existing_positions()
+        # Note: Position sync is done on first quote tick (after NautilusTrader reconciliation completes)
+        # See _sync_existing_positions() called in on_quote_tick()
 
         if self.config.auto_subscribe:
             # Subscribe to quote ticks for both instruments
@@ -256,6 +259,12 @@ class PaxgXautGridStrategy(Strategy):
 
         if not self._has_valid_quotes():
             return
+
+        # Sync existing positions on first valid quote tick
+        # This ensures NautilusTrader has finished reconciling positions from exchange
+        if not self._positions_synced:
+            self._sync_existing_positions()
+            self._positions_synced = True
 
         spread = self._calc_spread()
         if spread is None:
