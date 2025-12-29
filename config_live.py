@@ -69,13 +69,7 @@ def create_live_config() -> TradingNodeConfig:
         auto_subscribe=True,
 
         # Startup settings
-        startup_delay_sec=10.0,  # Wait for NautilusTrader reconciliation
-
-        # IMPORTANT: Set this to your current total notional when restarting with existing positions!
-        # NautilusTrader cannot detect positions from previous sessions.
-        # Check Bybit position page for actual exposure and set accordingly.
-        # Set to 0.0 when starting fresh with no positions.
-        initial_notional_override=6000.0,  # Current exposure: ~$6000 (PAXG + XAUT)
+        startup_delay_sec=10.0,  # Wait 10s for NautilusTrader position reconciliation
 
         # Strategy identification (required for multiple strategy instances)
         order_id_tag="001",
