@@ -36,27 +36,53 @@ def create_live_config() -> TradingNodeConfig:
         xaut_instrument_id="XAUTUSDT-LINEAR.BYBIT",
 
         # Grid levels (price spread as percentage of XAUT price)
-        # Optimized for $2500 capital with 10x leverage
-        # 8 levels with fine 0.05% spacing to capture current 0.37%-0.39% spread
-        # Levels 0.30%-0.35% will immediately trade at current market conditions
+        # Optimized for $2500 capital with 10x leverage and 30% safety reserve
+        # 15 levels: 5 low (0.1%-0.3%), 4 mid (0.4%-0.8%), 3 high (1.0%-2.0%), 3 extreme (3%-8%)
+        # Available capital: 1750 USDT (70%), Safety reserve: 750 USDT (30%)
         grid_levels=[
-            0.0010,  # 0.10% - First level
-            0.0015,  # 0.15% - Second level
-            0.0020,  # 0.20% - Third level
-            0.0025,  # 0.25% - Fourth level
-            0.0030,  # 0.30% - Fifth level (captures current spread!)
-            0.0035,  # 0.35% - Sixth level (captures current spread!)
-            0.0040,  # 0.40% - Seventh level (near current spread)
-            0.0050,  # 0.50% - Eighth level
+            0.0010,  # 0.10% - Low tier 1
+            0.0015,  # 0.15% - Low tier 2
+            0.0020,  # 0.20% - Low tier 3
+            0.0025,  # 0.25% - Low tier 4
+            0.0030,  # 0.30% - Low tier 5
+            0.0040,  # 0.40% - Mid tier 1
+            0.0050,  # 0.50% - Mid tier 2
+            0.0060,  # 0.60% - Mid tier 3
+            0.0080,  # 0.80% - Mid tier 4
+            0.0100,  # 1.00% - High tier 1
+            0.0150,  # 1.50% - High tier 2
+            0.0200,  # 2.00% - High tier 3
+            0.0300,  # 3.00% - Extreme tier 1
+            0.0500,  # 5.00% - Extreme tier 2
+            0.0800,  # 8.00% - Extreme tier 3
         ],
 
-        # Risk management - Adjusted for available balance with existing positions
-        # $300 per side = $600 total per grid
-        # 8 grids max = $4800 notional = $480 margin at 10x
-        # Works with existing ~$600 margin in use, total ~$1080 margin needed
-        base_notional_per_level=300.0,   # USDT per side (each leg)
-        max_total_notional=6000.0,       # Maximum total exposure allows flexibility
+        # Risk management - $2500 capital, 10x leverage, 30% safety reserve
+        # Base unit: 88.5 USDT per side (adjustable by position weights)
+        # Max total: 3500 USDT (2x available capital for flexibility)
+        base_notional_per_level=88.5,    # USDT per side (base unit, scaled by weights)
+        max_total_notional=3500.0,       # Maximum total exposure (2x available capital)
         target_leverage=10.0,            # Target leverage (set on Bybit exchange)
+
+        # Position weights for different grid levels (multiplier for base_notional_per_level)
+        # Lower spreads = smaller positions, higher spreads = larger positions
+        position_weights={
+            0.0010: 0.4,  # 35.4 USDT per side → 70.8 USDT total per grid
+            0.0015: 0.5,  # 44.3 USDT per side → 88.6 USDT total per grid
+            0.0020: 0.6,  # 53.1 USDT per side → 106.2 USDT total per grid
+            0.0025: 0.7,  # 62.0 USDT per side → 124.0 USDT total per grid
+            0.0030: 0.8,  # 70.8 USDT per side → 141.6 USDT total per grid
+            0.0040: 1.0,  # 88.5 USDT per side → 177.0 USDT total per grid
+            0.0050: 1.0,  # 88.5 USDT per side → 177.0 USDT total per grid
+            0.0060: 1.0,  # 88.5 USDT per side → 177.0 USDT total per grid
+            0.0080: 1.2,  # 106.2 USDT per side → 212.4 USDT total per grid
+            0.0100: 1.5,  # 132.8 USDT per side → 265.6 USDT total per grid
+            0.0150: 1.8,  # 159.3 USDT per side → 318.6 USDT total per grid
+            0.0200: 2.0,  # 177.0 USDT per side → 354.0 USDT total per grid
+            0.0300: 2.5,  # 221.3 USDT per side → 442.6 USDT total per grid
+            0.0500: 3.0,  # 265.5 USDT per side → 531.0 USDT total per grid
+            0.0800: 3.5,  # 309.8 USDT per side → 619.6 USDT total per grid
+        },
 
         # Trading parameters
         maker_offset_bps=1.0,            # 0.01% offset from mid price (tighter for fine grids)
@@ -74,9 +100,8 @@ def create_live_config() -> TradingNodeConfig:
         # IMPORTANT: Set this when restarting with existing positions!
         # Bybit doesn't report external positions to NautilusTrader.
         # Check Bybit position page and set to actual exposure.
-        # Current: ~$6000 total exposure (PAXG + XAUT positions)
         # Set to 0.0 when starting fresh with no positions.
-        initial_notional_override=6000.0,
+        initial_notional_override=0.0,
 
         # Strategy identification (required for multiple strategy instances)
         order_id_tag="001",

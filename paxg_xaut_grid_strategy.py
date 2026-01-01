@@ -45,6 +45,19 @@ class PaxgXautGridConfig(StrategyConfig, frozen=True):
     # 每档网格对应的名义价值（USDT），真实下单数量 = notional / price
     base_notional_per_level: float = 100.0
 
+    # 各档位权重映射（用于调整不同价差水平的仓位大小）
+    # Key: grid level, Value: weight multiplier (applied to base_notional_per_level)
+    # If not specified for a level, default weight is 1.0
+    position_weights: Dict[float, float] = field(
+        default_factory=lambda: {
+            0.0010: 0.4,  0.0015: 0.5,  0.0020: 0.6,
+            0.0025: 0.7,  0.0030: 0.8,  0.0040: 1.0,
+            0.0050: 1.0,  0.0060: 1.0,  0.0080: 1.2,
+            0.0100: 1.5,  0.0150: 1.8,  0.0200: 2.0,
+            0.0300: 2.5,  0.0500: 3.0,  0.0800: 3.5
+        }
+    )
+
     # 最大总名义风险（两条腿合计）
     # 如果你打算 10x 杠杆，可以设置为：账户权益的 5~8 倍（视风险偏好）
     max_total_notional: float = 1000.0
@@ -428,10 +441,9 @@ class PaxgXautGridStrategy(Strategy):
 
     def _handle_order_failure(self, order_id: Any, reason: str) -> None:
         """处理订单失败（拒绝/超时）时的配对订单清理"""
-        notional = self.config.base_notional_per_level
-
         for submit_time, tracker in list(self.paired_orders.items()):
             if tracker.paxg_order_id == order_id:
+                notional = self._get_level_notional(tracker.level)
                 self.log.warning(f"PAXG order {reason} for level={tracker.level}")
                 # 如果 XAUT 已经成交，需要平掉
                 if tracker.xaut_filled:
@@ -449,6 +461,7 @@ class PaxgXautGridStrategy(Strategy):
                 del self.paired_orders[submit_time]
                 break
             elif tracker.xaut_order_id == order_id:
+                notional = self._get_level_notional(tracker.level)
                 self.log.warning(f"XAUT order {reason} for level={tracker.level}")
                 # 如果 PAXG 已经成交，需要平掉
                 if tracker.paxg_filled:
@@ -476,9 +489,9 @@ class PaxgXautGridStrategy(Strategy):
         # 更新配对订单追踪器，检查是否两边都成交了
         both_filled = False
         tracker_submit_time = None  # Track which tracker to potentially remove
-        notional = self.config.base_notional_per_level
 
         for submit_time, tracker in self.paired_orders.items():
+            notional = self._get_level_notional(tracker.level)
             if tracker.paxg_order_id == event.client_order_id:
                 tracker.paxg_filled = True
                 tracker_submit_time = submit_time
@@ -572,7 +585,7 @@ class PaxgXautGridStrategy(Strategy):
 
             if abs_spread > level:
                 # 检查总风险（包括已成交和待成交的订单）
-                notional = self.config.base_notional_per_level
+                notional = self._get_level_notional(level)
                 total_exposure = self.total_notional + self.pending_notional + 2 * notional
                 if total_exposure > self.config.max_total_notional:
                     self.log.warning(
@@ -600,6 +613,11 @@ class PaxgXautGridStrategy(Strategy):
         return False
 
     # ========== Grid 开仓 / 平仓 ==========
+    def _get_level_notional(self, level: float) -> float:
+        """Get position size for a specific grid level using weight mapping"""
+        weight = self.config.position_weights.get(level, 1.0)
+        return self.config.base_notional_per_level * weight
+
     def _open_grid(self, level: float, spread: float) -> None:
         """
         spread > 0: PAXG 贵 → 空 PAXG，多 XAUT
@@ -613,7 +631,7 @@ class PaxgXautGridStrategy(Strategy):
         if paxg_price is None or xaut_price is None:
             return
 
-        notional = self.config.base_notional_per_level
+        notional = self._get_level_notional(level)
 
         paxg_qty = notional / paxg_price
         xaut_qty = notional / xaut_price
@@ -684,7 +702,8 @@ class PaxgXautGridStrategy(Strategy):
             self._close_position(state.xaut_pos_id)
             state.xaut_pos_id = None
 
-        self.total_notional = max(0.0, self.total_notional - 2 * self.config.base_notional_per_level)
+        notional = self._get_level_notional(level)
+        self.total_notional = max(0.0, self.total_notional - 2 * notional)
 
     def _close_all_grids(self) -> None:
         for level, state in self.grid_state.items():
@@ -826,7 +845,7 @@ class PaxgXautGridStrategy(Strategy):
                 continue
 
             # 检查是否只有一侧成交（不平衡成交）
-            notional = self.config.base_notional_per_level
+            notional = self._get_level_notional(tracker.level)
 
             if tracker.paxg_filled and not tracker.xaut_filled:
                 self.log.warning(
