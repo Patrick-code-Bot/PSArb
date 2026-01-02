@@ -142,6 +142,9 @@ def create_live_config() -> TradingNodeConfig:
     )
 
     # Logging configuration
+    # NOTE: NautilusTrader automatically adds timestamps to log filenames on each restart.
+    # This prevents overwriting but means old files accumulate.
+    # Use the cleanup_old_logs() function in run_live.py to remove old files on startup.
     logging_config = LoggingConfig(
         log_level="INFO",
         log_level_file="INFO",  # Changed from DEBUG to INFO to reduce log size
@@ -150,8 +153,8 @@ def create_live_config() -> TradingNodeConfig:
         log_file_format="json",
         log_colors=True,
         bypass_logging=False,
-        log_file_max_size=10_485_760,  # 10MB per file
-        log_file_max_backup_count=3,   # Keep 3 backup files (total: 40MB max)
+        log_file_max_size=10_485_760,  # 10MB per file (rotation within single series)
+        log_file_max_backup_count=3,   # Keep 3 backup files per series (applies to current series only)
     )
 
     # Execution engine configuration
