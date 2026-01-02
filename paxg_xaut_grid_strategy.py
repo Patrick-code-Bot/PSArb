@@ -117,6 +117,17 @@ class PairedOrderTracker:
     xaut_leg: str = ""  # "XAUT_LONG" or "XAUT_SHORT"
 
 
+@dataclass
+class PairedCloseTracker:
+    """Track paired PAXG+XAUT close orders to detect partial closes"""
+    level: float
+    paxg_order_id: Optional[Any] = None
+    xaut_order_id: Optional[Any] = None
+    paxg_filled: bool = False
+    xaut_filled: bool = False
+    submit_time: int = 0  # timestamp in nanoseconds
+
+
 # ==========================
 # 策略主体
 # ==========================
@@ -149,6 +160,10 @@ class PaxgXautGridStrategy(Strategy):
         # Key: 使用唯一标识符 (submit_time + level) 来追踪每对订单
         self.paired_orders: Dict[int, PairedOrderTracker] = {}
 
+        # 配对平仓订单追踪：用于检测不平衡平仓
+        # Key: submit_time, Value: PairedCloseTracker
+        self.paired_close_orders: Dict[int, PairedCloseTracker] = {}
+
         # 累计名义风险（仅计算实际成交的持仓）
         self.total_notional: float = 0.0
         # 待确认名义风险（已提交但未成交的订单）
@@ -158,6 +173,10 @@ class PaxgXautGridStrategy(Strategy):
         self._positions_synced: bool = False
         # Timestamp when strategy started (for startup delay calculation)
         self._start_time_ns: int = 0
+        # Last reconciliation timestamp (for periodic position reconciliation)
+        self._last_reconciliation_ns: int = 0
+        # Reconciliation interval (60 seconds)
+        self._reconciliation_interval_ns: int = 60_000_000_000
 
     # ========== 生命周期 ==========
     def on_start(self) -> None:
@@ -367,6 +386,10 @@ class PaxgXautGridStrategy(Strategy):
         # 网格开仓 / 平仓逻辑
         self._process_grids(spread)
 
+        # FIX #4: Periodic position reconciliation (every 60 seconds)
+        if self._should_reconcile():
+            self._reconcile_positions()
+
         # 持仓 rebalance
         self._rebalance_if_needed()
 
@@ -551,6 +574,62 @@ class PaxgXautGridStrategy(Strategy):
                     f"and positions set (PAXG={state.paxg_pos_id}, XAUT={state.xaut_pos_id})"
                 )
 
+        # FIX #3: Handle close order fills
+        # Check if this is a close order
+        self._handle_close_order_fill(event)
+
+    def _handle_close_order_fill(self, event) -> None:
+        """
+        Handle close order fills and only clear position state when both legs fill.
+
+        FIX #3: Prevents imbalanced closes by tracking close orders separately.
+        """
+        order_id = event.client_order_id
+
+        # Find the close order tracker for this order
+        for submit_time, tracker in list(self.paired_close_orders.items()):
+            notional = self._get_level_notional(tracker.level)
+
+            if tracker.paxg_order_id == order_id:
+                tracker.paxg_filled = True
+                self.log.info(f"PAXG close order filled for level={tracker.level}")
+
+                # Check if both filled
+                if tracker.xaut_filled:
+                    # Both legs closed successfully
+                    state = self.grid_state.get(tracker.level)
+                    if state:
+                        state.paxg_pos_id = None
+                        state.xaut_pos_id = None
+                    self.total_notional = max(0.0, self.total_notional - 2 * notional)
+                    del self.paired_close_orders[submit_time]
+                    self.log.info(
+                        f"✓ Grid level {tracker.level} fully closed. "
+                        f"Reduced notional by {2*notional:.2f}. "
+                        f"Total={self.total_notional:.2f}"
+                    )
+                break
+
+            elif tracker.xaut_order_id == order_id:
+                tracker.xaut_filled = True
+                self.log.info(f"XAUT close order filled for level={tracker.level}")
+
+                # Check if both filled
+                if tracker.paxg_filled:
+                    # Both legs closed successfully
+                    state = self.grid_state.get(tracker.level)
+                    if state:
+                        state.paxg_pos_id = None
+                        state.xaut_pos_id = None
+                    self.total_notional = max(0.0, self.total_notional - 2 * notional)
+                    del self.paired_close_orders[submit_time]
+                    self.log.info(
+                        f"✓ Grid level {tracker.level} fully closed. "
+                        f"Reduced notional by {2*notional:.2f}. "
+                        f"Total={self.total_notional:.2f}"
+                    )
+                break
+
     # ========== 网格逻辑 ==========
     def _process_grids(self, spread: float) -> None:
         """
@@ -693,50 +772,107 @@ class PaxgXautGridStrategy(Strategy):
         self.log.debug(f"Added {2*notional:.2f} to pending_notional, now pending={self.pending_notional:.2f}")
 
     def _close_grid(self, level: float, state: GridPositionState) -> None:
-        # 平掉这一档的两条腿
+        """
+        Close grid position with paired order tracking.
+
+        FIX #2: Track close orders to detect partial closes and prevent imbalance.
+        Don't clear position IDs or reduce notional until both orders fill.
+        """
+        # Check if position exists
+        if state.paxg_pos_id is None and state.xaut_pos_id is None:
+            self.log.debug(f"No positions to close at level={level}")
+            return
+
+        # Check if already closing this grid
+        for tracker in self.paired_close_orders.values():
+            if tracker.level == level:
+                self.log.debug(f"Already closing grid level={level}, skipping")
+                return
+
+        # Submit close orders
+        paxg_order = None
+        xaut_order = None
+
         if state.paxg_pos_id is not None:
-            self._close_position(state.paxg_pos_id)
-            state.paxg_pos_id = None
+            paxg_order = self._close_position(state.paxg_pos_id)
+            if paxg_order is None:
+                self.log.warning(f"Failed to submit PAXG close order for level={level}")
 
         if state.xaut_pos_id is not None:
-            self._close_position(state.xaut_pos_id)
-            state.xaut_pos_id = None
+            xaut_order = self._close_position(state.xaut_pos_id)
+            if xaut_order is None:
+                self.log.warning(f"Failed to submit XAUT close order for level={level}")
 
-        notional = self._get_level_notional(level)
-        self.total_notional = max(0.0, self.total_notional - 2 * notional)
+        # If no orders were submitted, clear the state
+        if paxg_order is None and xaut_order is None:
+            self.log.warning(f"No close orders submitted for level={level}, clearing state")
+            state.paxg_pos_id = None
+            state.xaut_pos_id = None
+            return
+
+        # Create close order tracker
+        submit_time = self.clock.timestamp_ns()
+        tracker = PairedCloseTracker(
+            level=level,
+            paxg_order_id=paxg_order.client_order_id if paxg_order else None,
+            xaut_order_id=xaut_order.client_order_id if xaut_order else None,
+            submit_time=submit_time,
+            paxg_filled=paxg_order is None,  # If no order, mark as "filled"
+            xaut_filled=xaut_order is None,
+        )
+        self.paired_close_orders[submit_time] = tracker
+
+        self.log.info(
+            f"Submitted close orders for grid level={level}: "
+            f"PAXG={paxg_order.client_order_id if paxg_order else 'N/A'}, "
+            f"XAUT={xaut_order.client_order_id if xaut_order else 'N/A'}"
+        )
+
+        # DON'T clear position IDs or reduce notional yet!
+        # Wait for both orders to fill (handled in on_order_filled)
 
     def _close_all_grids(self) -> None:
         for level, state in self.grid_state.items():
             self._close_grid(level, state)
 
-    def _close_position(self, pos_id: Any) -> None:  # PositionId type
+    def _close_position(self, pos_id: Any) -> Optional[Any]:  # PositionId type -> Optional[Order]
         """
-        使用限价单平仓，以更好的价格捕获利润
-        Close positions with limit orders to capture profit at favorable maker prices
+        使用市价单平仓，确保立即成交
+        Close positions with MARKET orders to ensure immediate execution
+
+        FIX #1: Changed from limit orders to market orders to prevent positions
+        from staying open when limit orders don't fill.
         """
         pos = self.cache.position(pos_id)
         if pos is None:
-            return
+            self.log.warning(f"Position not found in cache: {pos_id}")
+            return None
+
+        if not pos.is_open:
+            self.log.warning(f"Position already closed: {pos_id}")
+            return None
 
         inst = pos.instrument_id
         instrument = self.cache.instrument(inst)
         if instrument is None:
-            return
+            self.log.error(f"Instrument not found: {inst}")
+            return None
 
         side = OrderSide.SELL if pos.is_long else OrderSide.BUY
         qty = pos.quantity
 
-        bid, ask = self._get_bid_ask(inst)
-        price = self._maker_price(bid, ask, side)
-
-        close_order = self.order_factory.limit(
+        # Use MARKET order instead of LIMIT order for guaranteed execution
+        close_order = self.order_factory.market(
             instrument_id=inst,
             order_side=side,
             quantity=instrument.make_qty(float(qty)),
-            price=instrument.make_price(price),
-            time_in_force=TimeInForce.GTC,
+            time_in_force=TimeInForce.IOC,
+            reduce_only=True,  # Important: only reduce position, don't reverse
         )
         self.submit_order(close_order)
+        self.log.info(f"Submitted MARKET close order for {inst}, side={side}, qty={qty}")
+
+        return close_order
 
     # ========== Rebalance ==========
     def _rebalance_if_needed(self) -> None:
@@ -772,6 +908,76 @@ class PaxgXautGridStrategy(Strategy):
         # 简单方式：用市价或近似 limit 做一个微小反向单
         # 后续可以根据实际需求做精细实现
         pass
+
+    # ========== Position Reconciliation (FIX #4) ==========
+    def _should_reconcile(self) -> bool:
+        """Check if it's time to reconcile positions."""
+        current_time = self.clock.timestamp_ns()
+        elapsed = current_time - self._last_reconciliation_ns
+        return elapsed >= self._reconciliation_interval_ns
+
+    def _reconcile_positions(self) -> None:
+        """
+        Reconcile strategy's tracked positions with actual exchange positions.
+
+        FIX #4: Periodic reconciliation to detect and correct position drift.
+        Runs every 60 seconds to catch discrepancies from unfilled closes.
+        """
+        current_time = self.clock.timestamp_ns()
+        self._last_reconciliation_ns = current_time
+
+        # Get actual positions from cache
+        actual_paxg_notional = self._get_actual_position_notional(self.paxg_id)
+        actual_xaut_notional = self._get_actual_position_notional(self.xaut_id)
+        actual_total = actual_paxg_notional + actual_xaut_notional
+
+        # Compare with tracked notional
+        tracked_total = self.total_notional
+        diff = abs(actual_total - tracked_total)
+
+        # Log reconciliation
+        self.log.info(
+            f"Position Reconciliation: "
+            f"tracked={tracked_total:.2f}, "
+            f"actual={actual_total:.2f} (PAXG={actual_paxg_notional:.2f}, XAUT={actual_xaut_notional:.2f}), "
+            f"diff={diff:.2f}"
+        )
+
+        # If significant difference, update tracked notional
+        if diff > 100:  # 100 USDT threshold
+            self.log.warning(
+                f"⚠️ POSITION DRIFT DETECTED: {diff:.2f} USDT difference! "
+                f"Updating tracked notional from {tracked_total:.2f} to {actual_total:.2f}"
+            )
+            self.total_notional = actual_total
+
+            # Also check for imbalance
+            if actual_total > 0:
+                imbalance = abs(actual_paxg_notional - actual_xaut_notional) / actual_total
+                if imbalance > 0.20:  # 20% imbalance
+                    self.log.error(
+                        f"🚨 CRITICAL IMBALANCE: {imbalance*100:.2f}% "
+                        f"(PAXG={actual_paxg_notional:.2f}, XAUT={actual_xaut_notional:.2f})"
+                    )
+
+    def _get_actual_position_notional(self, instrument_id: InstrumentId) -> float:
+        """Get actual position notional from cache for a specific instrument."""
+        total_notional = 0.0
+
+        # Check all open positions
+        for pos in self.cache.positions_open():
+            if pos.instrument_id == instrument_id:
+                # Use current mid price for valuation
+                if instrument_id == self.paxg_id:
+                    price = self._mid_price(self.paxg_bid, self.paxg_ask)
+                else:
+                    price = self._mid_price(self.xaut_bid, self.xaut_ask)
+
+                if price is not None:
+                    notional = abs(float(pos.quantity)) * price
+                    total_notional += notional
+
+        return total_notional
 
     # ========== 行情辅助函数 ==========
     def _has_valid_quotes(self) -> bool:
@@ -893,6 +1099,115 @@ class PaxgXautGridStrategy(Strategy):
                 self.pending_notional = max(0.0, self.pending_notional - 2 * notional)
                 self.log.debug(f"Removed {2*notional:.2f} from pending_notional, now pending={self.pending_notional:.2f}")
                 del self.paired_orders[submit_time]
+
+        # Also check close order timeouts
+        self._check_close_order_timeouts()
+
+    def _check_close_order_timeouts(self) -> None:
+        """
+        Check for imbalanced close order fills.
+
+        If one close order fills but the other doesn't within timeout:
+        1. Log warning
+        2. Re-submit the unfilled close order
+        3. Update position tracking
+        """
+        if not self.paired_close_orders:
+            return
+
+        current_time = self.clock.timestamp_ns()
+        timeout_ns = int(self.config.order_timeout_sec * 1_000_000_000)
+
+        for submit_time, tracker in list(self.paired_close_orders.items()):
+            elapsed_time = current_time - tracker.submit_time
+
+            # Check if timeout reached
+            if elapsed_time < timeout_ns:
+                continue
+
+            # Check fill status
+            if tracker.paxg_filled and tracker.xaut_filled:
+                # Both filled - should have been cleaned up already, but clean up just in case
+                state = self.grid_state.get(tracker.level)
+                if state:
+                    state.paxg_pos_id = None
+                    state.xaut_pos_id = None
+                notional = self._get_level_notional(tracker.level)
+                self.total_notional = max(0.0, self.total_notional - 2 * notional)
+                del self.paired_close_orders[submit_time]
+                self.log.debug(f"Cleaned up completed close tracker for level={tracker.level}")
+
+            elif tracker.paxg_filled and not tracker.xaut_filled:
+                # PAXG closed but XAUT didn't - CRITICAL imbalance!
+                self.log.error(
+                    f"🚨 IMBALANCED CLOSE: PAXG closed but XAUT still open at level={tracker.level}! "
+                    f"Will retry closing XAUT."
+                )
+                # Cancel old order and retry
+                if tracker.xaut_order_id:
+                    self._safe_cancel_order(tracker.xaut_order_id)
+                # Retry closing XAUT
+                state = self.grid_state.get(tracker.level)
+                if state and state.xaut_pos_id:
+                    new_order = self._close_position(state.xaut_pos_id)
+                    if new_order:
+                        # Update tracker with new order
+                        tracker.xaut_order_id = new_order.client_order_id
+                        tracker.submit_time = current_time
+                        self.log.info(f"Resubmitted XAUT close order: {new_order.client_order_id}")
+                else:
+                    # Position already gone? Clear state
+                    if state:
+                        state.paxg_pos_id = None
+                        state.xaut_pos_id = None
+                    notional = self._get_level_notional(tracker.level)
+                    self.total_notional = max(0.0, self.total_notional - 2 * notional)
+                    del self.paired_close_orders[submit_time]
+
+            elif tracker.xaut_filled and not tracker.paxg_filled:
+                # XAUT closed but PAXG didn't - CRITICAL imbalance!
+                self.log.error(
+                    f"🚨 IMBALANCED CLOSE: XAUT closed but PAXG still open at level={tracker.level}! "
+                    f"Will retry closing PAXG."
+                )
+                # Cancel old order and retry
+                if tracker.paxg_order_id:
+                    self._safe_cancel_order(tracker.paxg_order_id)
+                # Retry closing PAXG
+                state = self.grid_state.get(tracker.level)
+                if state and state.paxg_pos_id:
+                    new_order = self._close_position(state.paxg_pos_id)
+                    if new_order:
+                        # Update tracker with new order
+                        tracker.paxg_order_id = new_order.client_order_id
+                        tracker.submit_time = current_time
+                        self.log.info(f"Resubmitted PAXG close order: {new_order.client_order_id}")
+                else:
+                    # Position already gone? Clear state
+                    if state:
+                        state.paxg_pos_id = None
+                        state.xaut_pos_id = None
+                    notional = self._get_level_notional(tracker.level)
+                    self.total_notional = max(0.0, self.total_notional - 2 * notional)
+                    del self.paired_close_orders[submit_time]
+
+            else:
+                # Neither filled - both close orders failed
+                self.log.warning(
+                    f"Both close orders timed out for level={tracker.level}. "
+                    f"Will retry closing both positions."
+                )
+                # Cancel old orders
+                if tracker.paxg_order_id:
+                    self._safe_cancel_order(tracker.paxg_order_id)
+                if tracker.xaut_order_id:
+                    self._safe_cancel_order(tracker.xaut_order_id)
+
+                # Retry closing the grid
+                del self.paired_close_orders[submit_time]
+                state = self.grid_state.get(tracker.level)
+                if state:
+                    self._close_grid(tracker.level, state)
 
     def _safe_cancel_order(self, order_id: Any) -> None:
         """安全地取消订单（检查订单状态）"""
