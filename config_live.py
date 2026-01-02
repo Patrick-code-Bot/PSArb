@@ -7,6 +7,7 @@ from pathlib import Path
 
 from nautilus_trader.adapters.bybit.config import BybitDataClientConfig, BybitExecClientConfig
 from nautilus_trader.adapters.bybit.factories import BybitLiveDataClientFactory, BybitLiveExecClientFactory
+from nautilus_trader.core.nautilus_pyo3 import BybitProductType
 from nautilus_trader.config import (
     InstrumentProviderConfig,
     LiveExecEngineConfig,
@@ -135,20 +136,21 @@ def create_live_config() -> TradingNodeConfig:
             load_all=True,
             load_ids=None,
         ),
+        product_types=[BybitProductType.LINEAR],  # Trading linear perpetuals (PAXG/XAUT)
         testnet=False,  # Set to True for testnet
-        # Note: Position mode must be configured on Bybit exchange directly, not via API
+        # Using One-Way Mode (default) - position mode must be set on Bybit exchange to match
     )
 
     # Logging configuration
     logging_config = LoggingConfig(
         log_level="INFO",
-        log_level_file="DEBUG",
+        log_level_file="INFO",  # Changed from DEBUG to INFO to reduce log size
         log_directory="logs",
         log_file_name="paxg_xaut_grid",
         log_file_format="json",
         log_colors=True,
         bypass_logging=False,
-        log_file_max_size=10_485_760,  # 10MB in bytes (10 * 1024 * 1024)
+        log_file_max_size=10_485_760,  # 10MB per file
         log_file_max_backup_count=3,   # Keep 3 backup files (total: 40MB max)
     )
 
