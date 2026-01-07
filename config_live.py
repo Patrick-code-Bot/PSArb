@@ -102,6 +102,7 @@ def create_live_config() -> TradingNodeConfig:
         # Bybit doesn't report external positions to NautilusTrader.
         # Check Bybit position page and set to actual exposure.
         # Set to 0.0 when starting fresh with no positions.
+        # UPDATED: Set to 0.0 - no existing positions after multiple restarts (2026-01-07 15:01)
         initial_notional_override=0.0,
 
         # Strategy identification (required for multiple strategy instances)

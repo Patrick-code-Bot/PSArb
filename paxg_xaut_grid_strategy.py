@@ -229,33 +229,52 @@ class PaxgXautGridStrategy(Strategy):
     def _sync_existing_positions(self) -> None:
         """
         Sync existing positions from exchange on startup.
-        
+
+        FIXED VERSION: Properly accounts for position weights and marks the CORRECT
+        grid levels (positions open at HIGH spreads, not low ones).
+
         Uses multiple methods to detect existing positions:
         1. Manual override (initial_notional_override) - most reliable for Bybit
         2. cache.positions_open() - positions tracked by NautilusTrader
         3. portfolio.net_exposure() - net exposure by instrument
         4. cache.positions() - fallback
-        
+
         Note: Bybit doesn't report external positions to NautilusTrader's reconciliation,
         so manual override is the most reliable method for restarts with existing positions.
         """
         # Method 0: Check for manual override first (most reliable for Bybit)
         if self.config.initial_notional_override > 0:
             self.total_notional = self.config.initial_notional_override
-            notional_per_grid = 2 * self.config.base_notional_per_level
-            estimated_grids = int(self.total_notional / notional_per_grid) if notional_per_grid > 0 else 0
-            
-            levels_sorted = sorted(self.config.grid_levels)
-            for i, level in enumerate(levels_sorted):
-                if i < estimated_grids:
+
+            # FIX: Mark grid levels from HIGHEST to LOWEST (positions open at high spreads)
+            # and account for position weights
+            levels_reverse = sorted(self.config.grid_levels, reverse=True)
+            remaining_notional = self.total_notional
+            marked_levels = []
+
+            for level in levels_reverse:
+                weight = self.config.position_weights.get(level, 1.0)
+                notional_for_level = 2 * self.config.base_notional_per_level * weight
+
+                if remaining_notional >= notional_for_level * 0.8:  # 80% threshold for matching
                     state = self.grid_state[level]
                     state.paxg_pos_id = "MANUAL_OVERRIDE"
                     state.xaut_pos_id = "MANUAL_OVERRIDE"
-                    self.log.info(f"Marked grid level={level} as occupied (manual override)")
-            
+                    marked_levels.append(level)
+                    remaining_notional -= notional_for_level
+                    self.log.info(
+                        f"Marked grid level={level:.4f} ({level*100:.2f}%) as occupied "
+                        f"(notional={notional_for_level:.2f}, remaining={remaining_notional:.2f})"
+                    )
+
+                if remaining_notional < 50:  # Stop when remaining is negligible
+                    break
+
             self.log.warning(
                 f"⚠️ STARTUP SYNC (MANUAL): initial_notional_override={self.total_notional:.2f}. "
-                f"Estimated {estimated_grids} grid(s) filled. Will not open new grids beyond max."
+                f"Marked {len(marked_levels)} grid level(s) as occupied: "
+                f"{[f'{l*100:.2f}%' for l in sorted(marked_levels)]}. "
+                f"Unaccounted notional: {remaining_notional:.2f}"
             )
             return
 
@@ -268,14 +287,14 @@ class PaxgXautGridStrategy(Strategy):
         for pos in self.cache.positions_open():
             if pos.instrument_id == self.paxg_id:
                 paxg_pos = pos
-                paxg_notional = float(pos.quantity) * float(pos.avg_px_open)
+                paxg_notional = abs(float(pos.quantity) * float(pos.avg_px_open))
                 self.log.info(
                     f"[cache.positions_open] Found PAXG position: qty={pos.quantity}, "
                     f"side={'LONG' if pos.is_long else 'SHORT'}, notional={paxg_notional:.2f}"
                 )
             elif pos.instrument_id == self.xaut_id:
                 xaut_pos = pos
-                xaut_notional = float(pos.quantity) * float(pos.avg_px_open)
+                xaut_notional = abs(float(pos.quantity) * float(pos.avg_px_open))
                 self.log.info(
                     f"[cache.positions_open] Found XAUT position: qty={pos.quantity}, "
                     f"side={'LONG' if pos.is_long else 'SHORT'}, notional={xaut_notional:.2f}"
@@ -288,17 +307,17 @@ class PaxgXautGridStrategy(Strategy):
                 # Get net exposure from portfolio (uses current prices)
                 paxg_exposure = self.portfolio.net_exposure(self.paxg_id)
                 xaut_exposure = self.portfolio.net_exposure(self.xaut_id)
-                
+
                 if paxg_exposure is not None:
                     paxg_notional = abs(float(paxg_exposure))
                     if paxg_notional > 0:
                         self.log.info(f"[portfolio.net_exposure] PAXG exposure: {paxg_notional:.2f}")
-                
+
                 if xaut_exposure is not None:
                     xaut_notional = abs(float(xaut_exposure))
                     if xaut_notional > 0:
                         self.log.info(f"[portfolio.net_exposure] XAUT exposure: {xaut_notional:.2f}")
-                        
+
             except Exception as e:
                 self.log.warning(f"Error checking portfolio.net_exposure: {e}")
 
@@ -307,28 +326,32 @@ class PaxgXautGridStrategy(Strategy):
             for pos in self.cache.positions():
                 if pos.instrument_id == self.paxg_id and pos.is_open:
                     paxg_pos = pos
-                    paxg_notional = float(pos.quantity) * float(pos.avg_px_open)
+                    paxg_notional = abs(float(pos.quantity) * float(pos.avg_px_open))
                     self.log.info(f"[cache.positions] Found PAXG: notional={paxg_notional:.2f}")
                 elif pos.instrument_id == self.xaut_id and pos.is_open:
                     xaut_pos = pos
-                    xaut_notional = float(pos.quantity) * float(pos.avg_px_open)
+                    xaut_notional = abs(float(pos.quantity) * float(pos.avg_px_open))
                     self.log.info(f"[cache.positions] Found XAUT: notional={xaut_notional:.2f}")
 
         # Calculate total and sync state
         total_detected = paxg_notional + xaut_notional
-        
+
         if total_detected > 0:
             self.total_notional = total_detected
-            
-            # Estimate grid levels filled
-            notional_per_grid = 2 * self.config.base_notional_per_level
-            estimated_grids = int(self.total_notional / notional_per_grid) if notional_per_grid > 0 else 0
-            
-            # Mark grid levels as occupied
-            levels_sorted = sorted(self.config.grid_levels)
-            for i, level in enumerate(levels_sorted):
-                if i < estimated_grids:
+
+            # FIX: Mark grid levels from HIGHEST to LOWEST (positions open at high spreads)
+            # and account for position weights
+            levels_reverse = sorted(self.config.grid_levels, reverse=True)
+            remaining_notional = self.total_notional
+            marked_levels = []
+
+            for level in levels_reverse:
+                weight = self.config.position_weights.get(level, 1.0)
+                notional_for_level = 2 * self.config.base_notional_per_level * weight
+
+                if remaining_notional >= notional_for_level * 0.8:  # 80% threshold for matching
                     state = self.grid_state[level]
+                    # Use actual position IDs if available
                     if paxg_pos is not None:
                         state.paxg_pos_id = paxg_pos.id
                     else:
@@ -337,12 +360,22 @@ class PaxgXautGridStrategy(Strategy):
                         state.xaut_pos_id = xaut_pos.id
                     else:
                         state.xaut_pos_id = "DETECTED"
-                    self.log.info(f"Marked grid level={level} as occupied")
+
+                    marked_levels.append(level)
+                    remaining_notional -= notional_for_level
+                    self.log.info(
+                        f"Marked grid level={level:.4f} ({level*100:.2f}%) as occupied "
+                        f"(notional={notional_for_level:.2f}, remaining={remaining_notional:.2f})"
+                    )
+
+                if remaining_notional < 50:  # Stop when remaining is negligible
+                    break
 
             self.log.warning(
-                f"⚠️ STARTUP SYNC: Detected {estimated_grids} grid(s) of existing exposure. "
+                f"⚠️ STARTUP SYNC: Detected {len(marked_levels)} grid level(s) of existing exposure. "
                 f"total_notional={self.total_notional:.2f} (PAXG={paxg_notional:.2f}, XAUT={xaut_notional:.2f}). "
-                f"Will not open new grids beyond max_total_notional."
+                f"Marked levels: {[f'{l*100:.2f}%' for l in sorted(marked_levels)]}. "
+                f"Unaccounted notional: {remaining_notional:.2f}"
             )
         else:
             self.log.info("No existing positions detected via cache or portfolio, starting fresh.")
@@ -794,12 +827,12 @@ class PaxgXautGridStrategy(Strategy):
         xaut_order = None
 
         if state.paxg_pos_id is not None:
-            paxg_order = self._close_position(state.paxg_pos_id)
+            paxg_order = self._close_position(state.paxg_pos_id, instrument_id=self.paxg_id)
             if paxg_order is None:
                 self.log.warning(f"Failed to submit PAXG close order for level={level}")
 
         if state.xaut_pos_id is not None:
-            xaut_order = self._close_position(state.xaut_pos_id)
+            xaut_order = self._close_position(state.xaut_pos_id, instrument_id=self.xaut_id)
             if xaut_order is None:
                 self.log.warning(f"Failed to submit XAUT close order for level={level}")
 
@@ -835,22 +868,45 @@ class PaxgXautGridStrategy(Strategy):
         for level, state in self.grid_state.items():
             self._close_grid(level, state)
 
-    def _close_position(self, pos_id: Any) -> Optional[Any]:  # PositionId type -> Optional[Order]
+    def _close_position(self, pos_id: Any, instrument_id=None) -> Optional[Any]:  # PositionId type -> Optional[Order]
         """
         使用市价单平仓，确保立即成交
         Close positions with MARKET orders to ensure immediate execution
 
         FIX #1: Changed from limit orders to market orders to prevent positions
         from staying open when limit orders don't fill.
-        """
-        pos = self.cache.position(pos_id)
-        if pos is None:
-            self.log.warning(f"Position not found in cache: {pos_id}")
-            return None
 
-        if not pos.is_open:
-            self.log.warning(f"Position already closed: {pos_id}")
-            return None
+        FIX #2: Handle string markers (MANUAL_OVERRIDE, DETECTED) from position sync.
+        These are placeholders and don't correspond to actual PositionId objects.
+        When pos_id is a string, we find and close the first open position for the instrument.
+        """
+        # Check if pos_id is a string marker (not a real PositionId)
+        if isinstance(pos_id, str):
+            if instrument_id is None:
+                self.log.warning(f"Cannot close placeholder position without instrument_id: {pos_id}")
+                return None
+
+            # Find first open position for this instrument
+            pos = None
+            for p in self.cache.positions_open():
+                if p.instrument_id == instrument_id:
+                    pos = p
+                    break
+
+            if pos is None:
+                self.log.warning(f"No open position found for {instrument_id} (placeholder={pos_id})")
+                return None
+
+            self.log.info(f"Found open position {pos.id} for {instrument_id} (was placeholder={pos_id})")
+        else:
+            pos = self.cache.position(pos_id)
+            if pos is None:
+                self.log.warning(f"Position not found in cache: {pos_id}")
+                return None
+
+            if not pos.is_open:
+                self.log.warning(f"Position already closed: {pos_id}")
+                return None
 
         inst = pos.instrument_id
         instrument = self.cache.instrument(inst)
